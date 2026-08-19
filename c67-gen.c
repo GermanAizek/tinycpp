@@ -2131,12 +2131,11 @@ ST_FUNC int gjmp_append(int n0, int t)
 /* generate an integer binary operation */
 void gen_opi(int op)
 {
-    int r, fr, opc, t;
+    int r, fr, t;
 
     switch (op) {
     case '+':
     case TOK_ADDC1:		/* add with carry generation */
-	opc = 0;
       gen_op8:
 
 
@@ -2205,22 +2204,11 @@ void gen_opi(int op)
 	break;
     case '-':
     case TOK_SUBC1:		/* sub with carry generation */
-	opc = 5;
-	goto gen_op8;
     case TOK_ADDC2:		/* add with carry use */
-	opc = 2;
-	goto gen_op8;
     case TOK_SUBC2:		/* sub with carry use */
-	opc = 3;
-	goto gen_op8;
     case '&':
-	opc = 4;
-	goto gen_op8;
     case '^':
-	opc = 6;
-	goto gen_op8;
     case '|':
-	opc = 1;
 	goto gen_op8;
     case '*':
     case TOK_UMULL:
@@ -2279,7 +2267,6 @@ void gen_opi(int op)
 	goto call_func;
 
     default:
-	opc = 7;
 	goto gen_op8;
     }
 }
@@ -2289,7 +2276,7 @@ void gen_opi(int op)
 /* XXX: need to use ST1 too */
 void gen_opf(int op)
 {
-    int ft, fc, fr, r;
+    int ft, fr, r;
 
     if (op >= TOK_ULT && op <= TOK_GT)
 	gv2(RC_EDX, RC_EAX);	// make sure src2 is on b side
@@ -2297,7 +2284,6 @@ void gen_opf(int op)
 	gv2(RC_FLOAT, RC_FLOAT);	// make sure src2 is on b side
 
     ft = vtop->type.t;
-    fc = vtop->c.i;
     r = vtop->r;
     fr = vtop[-1].r;
 

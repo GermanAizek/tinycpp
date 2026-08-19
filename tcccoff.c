@@ -199,7 +199,7 @@ ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f)
 	    Stab_Sym *sym, *sym_end;
 	    char func_name[MAX_FUNC_NAME_LENGTH],
 		last_func_name[MAX_FUNC_NAME_LENGTH];
-	    unsigned long func_addr, last_pc, pc;
+	    unsigned long func_addr, pc;
 	    const char *incl_files[INCLUDE_STACK_SIZE];
 	    int incl_index, len, last_line_num;
 	    const char *str, *p;
@@ -211,7 +211,6 @@ ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f)
 	    func_addr = 0;
 	    incl_index = 0;
 	    last_func_name[0] = '\0';
-	    last_pc = 0xffffffff;
 	    last_line_num = 1;
 	    sym = (Stab_Sym *) stab_section->data + 1;
 	    sym_end =
@@ -272,8 +271,6 @@ ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f)
 		    /* line number info */
 		case N_SLINE:
 		    pc = sym->n_value + func_addr;
-
-		    last_pc = pc;
 		    last_line_num = sym->n_desc;
 
 		    /* XXX: slow! */
@@ -514,19 +511,17 @@ ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f)
 	int i;
 	Elf32_Sym *p;
 	const char *name;
-	int nstr;
 	int n = 0;
 
 	Coff_str_table = (char *) tcc_malloc(MAX_STR_TABLE);
 	pCoff_str_table = Coff_str_table;
-	nstr = 0;
 
 	p = (Elf32_Sym *) symtab_section->data;
 
 
 	for (i = 0; i < nb_syms; i++) {
 
-	    name = symtab_section->link->data + p->st_name;
+	    name = (const char *) symtab_section->link->data + p->st_name;
 
 	    for (k = 0; k < 8; k++)
 		csym._n._n_name[k] = 0;
@@ -544,7 +539,6 @@ ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f)
 
 		strcpy(pCoff_str_table, name);
 		pCoff_str_table += strlen(name) + 1;	// skip over null
-		nstr++;
 	    }
 
 	    if (p->st_info == 4) {

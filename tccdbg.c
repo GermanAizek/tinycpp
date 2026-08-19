@@ -879,12 +879,16 @@ ST_FUNC void tcc_eh_frame_start(TCCState *s1)
 
 static void tcc_debug_frame_end(TCCState *s1, int size)
 {
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
     int eh_section_sym;
+#endif
     unsigned long fde_start;
 
     if (!eh_frame_section)
 	return;
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
     eh_section_sym = dwarf_get_section_sym(text_section);
+#endif
     fde_start = eh_frame_section->data_offset;
     dwarf_data4(eh_frame_section, 0); // length
     dwarf_data4(eh_frame_section,

@@ -2819,7 +2819,7 @@ static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
         printf("<- %s\n", filename);
 #ifdef TCC_TARGET_COFF
     if (s1->output_format == TCC_OUTPUT_FORMAT_COFF)
-        tcc_output_coff(s1, f);
+        ret = tcc_output_coff(s1, f);
     else
 #endif
     if (s1->output_format == TCC_OUTPUT_FORMAT_ELF)
