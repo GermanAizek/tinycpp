@@ -57,6 +57,7 @@ tests/tcctest.gcc
 tests/*.out*
 tests/*.ref
 tests/*.txt
+!tests/CMakeLists.txt
 tests/*.gcc
 tests/*-cc*
 tests/*-tcc*
@@ -68,3 +69,10 @@ tests/vla_test
 tests/hello
 tests/tests2/fred.txt
 libtcc.dylib
+
+# CMake
+build/
+build-*/
+cmake-build-*/
+CMakeUserPresets.json
+Testing/
