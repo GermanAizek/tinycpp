@@ -137,6 +137,7 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
     tcc_bdir = os.path.abspath(build_dir)
     
     is_tcc = "tcc" in compiler_name or "t++" in compiler_name
+    math_needed = any(k in bench_basename for k in ("mandelbrot", "nbody", "raytracer", "spectral_norm"))
     
     if is_tcc:
         compile_cmd = [compiler_bin, "-B", tcc_bdir, "-I", tcc_include_dir]
@@ -145,7 +146,9 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
                 compile_cmd += ["-L/usr/lib/x86_64-linux-gnu"]
         if opt_flag != "-O0":
             compile_cmd += [opt_flag]
-        compile_cmd += ["-o", out_exe, bench_file, "-lm"]
+        compile_cmd += ["-o", out_exe, bench_file]
+        if math_needed:
+            compile_cmd += ["-lm"]
     else:
         compile_cmd = [compiler_bin, opt_flag]
         if arch == "i386":
@@ -156,7 +159,9 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
             compile_cmd += ["--target=aarch64-linux-gnu"]
         elif arch == "riscv64" and "clang" in compiler_name:
             compile_cmd += ["--target=riscv64-linux-gnu"]
-        compile_cmd += ["-o", out_exe, bench_file, "-lm"]
+        compile_cmd += ["-o", out_exe, bench_file]
+        if math_needed:
+            compile_cmd += ["-lm"]
 
     # Measure compilation over multiple runs
     c_times = []
