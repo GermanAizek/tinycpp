@@ -146,8 +146,8 @@ add_custom_target(
 add_test(
     NAME test_benchmarks
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_benchmarks.py
-        --quick
         --build-dir ${CMAKE_BINARY_DIR}
         --src-dir ${CMAKE_SOURCE_DIR}
         --tcc $<TARGET_FILE:tcc>
+        --opt-levels=-O0,-O1,-O2,-O3,-Os
 )

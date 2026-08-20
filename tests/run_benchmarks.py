@@ -14,6 +14,8 @@ import subprocess
 import shutil
 import platform
 import glob
+import threading
+import concurrent.futures
 
 # Try to find /usr/bin/time or time binary
 TIME_BIN = shutil.which("time")
@@ -31,7 +33,8 @@ def run_command_measured(cmd, build_dir, timeout_sec=60):
     Run command using /usr/bin/time to accurately capture real elapsed time and peak memory (Max RSS).
     Returns (returncode, elapsed_ms, peak_rss_kb, stdout, stderr)
     """
-    time_output_file = os.path.join(build_dir, f"bench_time_{os.getpid()}_{time.time_ns()}.txt")
+    tid = threading.get_ident()
+    time_output_file = os.path.join(build_dir, f"bench_time_{os.getpid()}_{tid}_{time.time_ns()}.txt")
     
     if TIME_BIN and os.path.exists(TIME_BIN):
         # %M = max RSS in KB, %e = elapsed real seconds, %U = user sec, %S = sys sec
@@ -125,7 +128,8 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
     Compile and run a single benchmark configuration.
     """
     bench_basename = os.path.splitext(os.path.basename(bench_file))[0]
-    out_exe = os.path.join(build_dir, f"bench_{bench_basename}_{compiler_name}_{opt_flag.replace('-', '')}_{arch}.exe")
+    tid = threading.get_ident()
+    out_exe = os.path.join(build_dir, f"bench_{bench_basename}_{compiler_name}_{opt_flag.replace('-', '')}_{arch}_{tid}.exe")
     
     # Construct compilation command
     compile_cmd = []
@@ -141,7 +145,7 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
                 compile_cmd += ["-L/usr/lib/x86_64-linux-gnu"]
         if opt_flag != "-O0":
             compile_cmd += [opt_flag]
-        compile_cmd += ["-o", out_exe, bench_file]
+        compile_cmd += ["-o", out_exe, bench_file, "-lm"]
     else:
         compile_cmd = [compiler_bin, opt_flag]
         if arch == "i386":
@@ -152,7 +156,7 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
             compile_cmd += ["--target=aarch64-linux-gnu"]
         elif arch == "riscv64" and "clang" in compiler_name:
             compile_cmd += ["--target=riscv64-linux-gnu"]
-        compile_cmd += ["-o", out_exe, bench_file]
+        compile_cmd += ["-o", out_exe, bench_file, "-lm"]
 
     # Measure compilation
     c_rc, c_time_ms, c_rss_kb, c_stdout, c_stderr = run_command_measured(compile_cmd, build_dir, timeout_sec=timeout_sec)
@@ -429,12 +433,17 @@ def generate_html_report(results, report_file):
             font-weight: 600;
             text-transform: uppercase;
         }}
-        .badge-tcc {{ background-color: rgba(56, 189, 248, 0.2); color: #38bdf8; }}
-        .badge-gcc {{ background-color: rgba(248, 113, 113, 0.2); color: #f87171; }}
-        .badge-clang {{ background-color: rgba(192, 132, 252, 0.2); color: #c084fc; }}
+        .badge-tcc {{ background-color: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }}
+        .badge-gcc {{ background-color: rgba(248, 113, 113, 0.2); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.4); }}
+        .badge-clang {{ background-color: rgba(192, 132, 252, 0.2); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.4); }}
+        .badge-c {{ background-color: rgba(74, 222, 128, 0.2); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.4); }}
+        .badge-cpp {{ background-color: rgba(96, 165, 250, 0.2); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.4); }}
         .badge-opt {{ background-color: rgba(250, 204, 21, 0.2); color: #facc15; }}
-        .badge-c {{ background-color: rgba(74, 222, 128, 0.2); color: #4ade80; }}
-        .badge-cpp {{ background-color: rgba(96, 165, 250, 0.2); color: #60a5fa; }}
+        .badge-opt-O0 {{ background-color: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }}
+        .badge-opt-O1 {{ background-color: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.4); }}
+        .badge-opt-O2 {{ background-color: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); }}
+        .badge-opt-O3 {{ background-color: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.4); }}
+        .badge-opt-Os {{ background-color: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4); }}
         .bar-container {{
             background-color: var(--bg-main);
             height: 20px;
@@ -489,6 +498,11 @@ def generate_html_report(results, report_file):
                 <div class="desc">Less compiler memory (Peak RSS)</div>
             </div>
             <div class="stat-card">
+                <div class="label">Runtime Peak RAM</div>
+                <div class="value" id="kpiExecRam">-- KB</div>
+                <div class="desc">Average execution memory (Max RSS)</div>
+            </div>
+            <div class="stat-card">
                 <div class="label">Average Binary Size</div>
                 <div class="value" id="kpiBinSize">-- KB</div>
                 <div class="desc">Compact native executables</div>
@@ -496,7 +510,7 @@ def generate_html_report(results, report_file):
             <div class="stat-card">
                 <div class="label">Benchmark Test Runs</div>
                 <div class="value" id="kpiTotalRuns">0</div>
-                <div class="desc">Across all optimization levels</div>
+                <div class="desc">Across all optimization levels (-O0 to -Os)</div>
             </div>
         </div>
 
@@ -505,7 +519,7 @@ def generate_html_report(results, report_file):
             <div class="control-group">
                 <label for="filterLang">Language:</label>
                 <select id="filterLang" onchange="applyFilters()">
-                    <option value="ALL">All (C & C++)</option>
+                    <option value="ALL" selected>All (C & C++)</option>
                     <option value="c">C</option>
                     <option value="cpp">C++</option>
                 </select>
@@ -513,16 +527,16 @@ def generate_html_report(results, report_file):
             <div class="control-group">
                 <label for="filterArch">Architecture:</label>
                 <select id="filterArch" onchange="applyFilters()">
-                    <option value="ALL">All Architectures</option>
+                    <option value="ALL" selected>All Architectures</option>
                 </select>
             </div>
             <div class="control-group">
                 <label for="filterOpt">Optimization:</label>
                 <select id="filterOpt" onchange="applyFilters()">
-                    <option value="ALL">All Levels</option>
+                    <option value="ALL" selected>All Levels (-O0, -O1, -O2, -O3, -Os)</option>
                     <option value="-O0">-O0</option>
                     <option value="-O1">-O1</option>
-                    <option value="-O2" selected>-O2</option>
+                    <option value="-O2">-O2</option>
                     <option value="-O3">-O3</option>
                     <option value="-Os">-Os</option>
                 </select>
@@ -530,7 +544,7 @@ def generate_html_report(results, report_file):
             <div class="control-group">
                 <label for="filterBench">Benchmark:</label>
                 <select id="filterBench" onchange="applyFilters()">
-                    <option value="ALL">All Tasks</option>
+                    <option value="ALL" selected>All Tasks</option>
                 </select>
             </div>
             <div class="control-group" style="margin-left: auto;">
@@ -551,6 +565,10 @@ def generate_html_report(results, report_file):
             <div class="chart-card">
                 <h3>🚀 Runtime Execution Time (ms) — Lower is Better</h3>
                 <div id="chartExecTime"></div>
+            </div>
+            <div class="chart-card">
+                <h3>💾 Runtime Execution Peak RAM (Max RSS KB) — Lower is Better</h3>
+                <div id="chartExecRam"></div>
             </div>
             <div class="chart-card">
                 <h3>📦 Executable Binary Size (KB) — Lower is Better</h3>
@@ -592,9 +610,10 @@ def generate_html_report(results, report_file):
         let currentSort = {{ key: 'benchmark', asc: true }};
 
         function init() {{
-            // Populate Architectures & Benchmarks dropdowns
-            const archs = new Set(rawData.map(d => d.arch));
+            // Populate Architectures dropdown
+            const archs = Array.from(new Set(rawData.map(d => d.arch))).sort();
             const archSelect = document.getElementById('filterArch');
+            archSelect.innerHTML = '<option value="ALL" selected>All Architectures</option>';
             archs.forEach(a => {{
                 const opt = document.createElement('option');
                 opt.value = a;
@@ -602,8 +621,23 @@ def generate_html_report(results, report_file):
                 archSelect.appendChild(opt);
             }});
 
-            const benches = new Set(rawData.map(d => d.benchmark));
+            // Populate Optimizations dropdown
+            const opts = Array.from(new Set(rawData.map(d => d.opt))).sort();
+            const optSelect = document.getElementById('filterOpt');
+            optSelect.innerHTML = '<option value="ALL" selected>All Levels (-O0, -O1, -O2, -O3, -Os)</option>';
+            ['-O0', '-O1', '-O2', '-O3', '-Os'].forEach(o => {{
+                if (opts.includes(o)) {{
+                    const optEl = document.createElement('option');
+                    optEl.value = o;
+                    optEl.textContent = o;
+                    optSelect.appendChild(optEl);
+                }}
+            }});
+
+            // Populate Benchmarks dropdown
+            const benches = Array.from(new Set(rawData.map(d => d.benchmark))).sort();
             const benchSelect = document.getElementById('filterBench');
+            benchSelect.innerHTML = '<option value="ALL" selected>All Tasks</option>';
             benches.forEach(b => {{
                 const opt = document.createElement('option');
                 opt.value = b;
@@ -665,6 +699,14 @@ def generate_html_report(results, report_file):
             if (data.length > 0) {{
                 const avgBin = data.reduce((a, b) => a + b.binary_size_bytes, 0) / data.length / 1024;
                 document.getElementById('kpiBinSize').textContent = avgBin.toFixed(1) + ' KB';
+
+                const validExec = data.filter(d => d.exec_peak_rss_kb > 0);
+                if (validExec.length > 0) {{
+                    const avgExecRam = validExec.reduce((a, b) => a + b.exec_peak_rss_kb, 0) / validExec.length;
+                    document.getElementById('kpiExecRam').textContent = Math.round(avgExecRam).toLocaleString() + ' KB';
+                }} else {{
+                    document.getElementById('kpiExecRam').textContent = '-- KB';
+                }}
             }}
         }}
 
@@ -724,6 +766,7 @@ def generate_html_report(results, report_file):
             renderBarChart('chartCompileTime', data, 'compile_time_ms', 'ms');
             renderBarChart('chartCompilerRam', data, 'compiler_peak_rss_kb', 'KB');
             renderBarChart('chartExecTime', data, 'exec_time_ms', 'ms');
+            renderBarChart('chartExecRam', data, 'exec_peak_rss_kb', 'KB');
             renderBarChart('chartBinSize', data.map(d => ({{...d, bin_kb: d.binary_size_bytes/1024}})), 'bin_kb', 'KB');
         }}
 
@@ -745,13 +788,14 @@ def generate_html_report(results, report_file):
                 const tr = document.createElement('tr');
                 const compBadgeClass = (d.compiler.startsWith('tcc') || d.compiler === 't++') ? 'badge-tcc' : (d.compiler.startsWith('gcc') || d.compiler.startsWith('g++') ? 'badge-gcc' : 'badge-clang');
                 const langBadgeClass = d.lang === 'c' ? 'badge-c' : 'badge-cpp';
+                const optBadgeClass = 'badge-opt-' + d.opt.replace('-', '');
 
                 tr.innerHTML = `
                     <td><strong>${{d.benchmark}}</strong></td>
                     <td><span class="badge ${{langBadgeClass}}">${{d.lang.toUpperCase()}}</span></td>
                     <td><span class="badge" style="background: rgba(255,255,255,0.08); color: #cbd5e1;">${{d.arch}}</span></td>
                     <td><span class="badge ${{compBadgeClass}}">${{d.compiler}}</span></td>
-                    <td><span class="badge badge-opt">${{d.opt}}</span></td>
+                    <td><span class="badge ${{optBadgeClass}}">${{d.opt}}</span></td>
                     <td style="color: var(--accent-green); font-weight: 600;">${{d.compile_time_ms.toFixed(1)}} ms</td>
                     <td>${{d.compiler_peak_rss_kb.toLocaleString()}} KB</td>
                     <td style="font-weight: 600;">${{d.exec_time_ms > 0 ? d.exec_time_ms.toFixed(1) + ' ms' : '<span style="color: var(--text-muted);">N/A</span>'}}</td>
@@ -798,6 +842,7 @@ def main():
     parser.add_argument("--tcc", default=None, help="Path to tcc executable")
     parser.add_argument("--html-out", default=None, help="Output HTML file path")
     parser.add_argument("--json-out", default=None, help="Output JSON file path")
+    parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, help="Number of parallel worker threads (default: CPU cores)")
     parser.add_argument("--opt-levels", default="-O0,-O1,-O2,-O3,-Os", help="Comma-separated optimization levels")
     parser.add_argument("--archs", default="x86_64", help="Comma-separated target architectures (e.g. x86_64,i386,arm,arm64,riscv64)")
     parser.add_argument("--quick", action="store_true", help="Quick mode (only -O0 and -O2 on native arch)")
@@ -812,6 +857,7 @@ def main():
 
     opt_levels = ["-O0", "-O2"] if args.quick else args.opt_levels.split(",")
     archs = ["x86_64"] if args.quick else args.archs.split(",")
+    jobs = max(1, args.jobs)
 
     compilers = discover_compilers(build_dir, args.tcc)
     emulators = discover_emulators()
@@ -822,56 +868,72 @@ def main():
     print(f"   Emulators: {list(emulators.keys())}")
     print(f"   Optimization Levels: {opt_levels}")
     print(f"   Target Architectures: {archs}")
+    print(f"   Parallel Workers: {jobs}")
     print("=" * 60)
 
     c_benchmarks = sorted(glob.glob(os.path.join(bench_dir, "c", "*.c")))
     cpp_benchmarks = sorted(glob.glob(os.path.join(bench_dir, "cpp", "*.cpp")))
 
-    results = []
-
-    # 1. Run C benchmarks
+    # Collect tasks
+    tasks = []
+    
+    # 1. C benchmarks
     for bench in c_benchmarks:
-        bench_name = os.path.basename(bench)
-        print(f"\n--- Running C Benchmark: {bench_name} ---")
         for arch in archs:
             for opt in opt_levels:
-                # Test GCC, Clang, TCC
                 comp_list = []
                 if "gcc" in compilers: comp_list.append(("gcc", compilers["gcc"]))
                 if "clang" in compilers: comp_list.append(("clang", compilers["clang"]))
-                
-                # TCC arch selection
                 if arch == "x86_64" and "tcc" in compilers:
                     comp_list.append(("tcc", compilers["tcc"]))
                 elif f"tcc-{arch}" in compilers:
                     comp_list.append((f"tcc-{arch}", compilers[f"tcc-{arch}"]))
 
                 for comp_name, comp_bin in comp_list:
-                    res = build_and_run_benchmark(bench, "c", comp_name, comp_bin, opt, arch, build_dir, emulators)
-                    results.append(res)
-                    status = "OK" if res["compile_success"] else "FAIL"
-                    print(f"  [{status}] {comp_name:<10} {opt:<4} ({arch}): Compile {res['compile_time_ms']:>6.1f}ms (RAM {res['compiler_peak_rss_kb']:>5}KB) | Run {res['exec_time_ms']:>6.1f}ms | Bin {res['binary_size_bytes']:>6}B")
+                    tasks.append((bench, "c", comp_name, comp_bin, opt, arch, build_dir, emulators))
 
-    # 2. Run C++ benchmarks
+    # 2. C++ benchmarks
     for bench in cpp_benchmarks:
-        bench_name = os.path.basename(bench)
-        print(f"\n--- Running C++ Benchmark: {bench_name} ---")
         for arch in archs:
             for opt in opt_levels:
                 comp_list = []
                 if "g++" in compilers: comp_list.append(("g++", compilers["g++"]))
                 if "clang++" in compilers: comp_list.append(("clang++", compilers["clang++"]))
-                
                 if arch == "x86_64" and "t++" in compilers:
                     comp_list.append(("t++", compilers["t++"]))
                 elif f"tcc-{arch}" in compilers:
                     comp_list.append((f"t++-{arch}", compilers[f"tcc-{arch}"]))
 
                 for comp_name, comp_bin in comp_list:
-                    res = build_and_run_benchmark(bench, "cpp", comp_name, comp_bin, opt, arch, build_dir, emulators)
-                    results.append(res)
-                    status = "OK" if res["compile_success"] else "FAIL"
-                    print(f"  [{status}] {comp_name:<10} {opt:<4} ({arch}): Compile {res['compile_time_ms']:>6.1f}ms (RAM {res['compiler_peak_rss_kb']:>5}KB) | Run {res['exec_time_ms']:>6.1f}ms | Bin {res['binary_size_bytes']:>6}B")
+                    tasks.append((bench, "cpp", comp_name, comp_bin, opt, arch, build_dir, emulators))
+
+    print(f"\n[*] Executing {len(tasks)} benchmark runs across {jobs} parallel worker threads...\n")
+    start_time = time.perf_counter()
+
+    lock = threading.Lock()
+    completed_count = 0
+    total_count = len(tasks)
+
+    def worker(task):
+        nonlocal completed_count
+        bench, lang, comp_name, comp_bin, opt, arch, bdir, emus = task
+        res = build_and_run_benchmark(bench, lang, comp_name, comp_bin, opt, arch, bdir, emus)
+        with lock:
+            completed_count += 1
+            status = "OK" if res["compile_success"] else "FAIL"
+            print(f"  [{completed_count:>3}/{total_count}] [{status}] {res['benchmark']:<18} | {comp_name:<8} {opt:<4} ({arch}): Compile {res['compile_time_ms']:>5.1f}ms (RAM {res['compiler_peak_rss_kb']:>5}KB) | Run {res['exec_time_ms']:>5.1f}ms (RAM {res['exec_peak_rss_kb']:>5}KB) | Bin {res['binary_size_bytes']:>5}B")
+        return res
+
+    results = []
+    if jobs == 1:
+        for t in tasks:
+            results.append(worker(t))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+            results = list(executor.map(worker, tasks))
+
+    elapsed_total = time.perf_counter() - start_time
+    print(f"\n[✓] Completed {len(results)} benchmark runs in {elapsed_total:.2f} seconds ({len(results)/elapsed_total:.1f} runs/sec).")
 
     # Save JSON and HTML
     with open(json_out, "w", encoding="utf-8") as f:

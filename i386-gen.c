@@ -896,12 +896,55 @@ ST_FUNC void gen_opi(int op)
         opc = 1;
         goto gen_op8;
     case '*':
-        gv2(RC_INT, RC_INT);
-        r = vtop[-1].r;
-        fr = vtop[0].r;
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+            vswap();
+            r = gv(RC_INT);
+            vswap();
+            c = vtop->c.i;
+            if (c == 0) {
+                o(0x31); /* xor r, r */
+                o(0xc0 + r * 9);
+            } else if (c == 1) {
+                /* nop */
+            } else if (c == 2) {
+                o(0x01); /* add r, r */
+                o(0xc0 + r * 9);
+            } else if (c == 3) {
+                o(0x8d); /* lea (r, r, 2), r */
+                o(0x04 | (r << 3));
+                o(0x40 | (r << 3) | r);
+            } else if (c == 5) {
+                o(0x8d); /* lea (r, r, 4), r */
+                o(0x04 | (r << 3));
+                o(0x80 | (r << 3) | r);
+            } else if (c == 9) {
+                o(0x8d); /* lea (r, r, 8), r */
+                o(0x04 | (r << 3));
+                o(0xc0 | (r << 3) | r);
+            } else if (c == 4 || c == 8 || c == 16 || c == 32 || c == 64 ||
+                       c == 128 || c == 256 || c == 512 || c == 1024 ||
+                       c == 2048 || c == 4096) {
+                int shift = 0, tmp = c;
+                while (tmp > 1) { shift++; tmp >>= 1; }
+                o(0xc1); /* shl $shift, r */
+                o(0xe0 | r);
+                g(shift);
+            } else if (c == (signed char)c) {
+                o(0x6b); /* imul $imm8, r, r */
+                o(0xc0 | (r << 3) | r);
+                g(c);
+            } else {
+                o(0x69); /* imul $imm32, r, r */
+                oad(0xc0 | (r << 3) | r, c);
+            }
+        } else {
+            gv2(RC_INT, RC_INT);
+            r = vtop[-1].r;
+            fr = vtop[0].r;
+            o(0xaf0f); /* imul fr, r */
+            o(0xc0 + fr + r * 8);
+        }
         vtop--;
-        o(0xaf0f); /* imul fr, r */
-        o(0xc0 + fr + r * 8);
         break;
     case TOK_SHL:
         opc = 4;

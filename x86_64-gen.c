@@ -885,8 +885,10 @@ void gfunc_call(int nb_args)
                     gen_offs_sp(0x89, r, arg*8);
                 } else {
                     d = arg_prepare_reg(arg);
-                    orex(1,d,r,0x89); /* mov */
-                    o(0xc0 + REG_VALUE(r) * 8 + REG_VALUE(d));
+                    if (r != d) {
+                        orex(1,d,r,0x89); /* mov */
+                        o(0xc0 + REG_VALUE(r) * 8 + REG_VALUE(d));
+                    }
                 }
             }
         }
@@ -1385,12 +1387,16 @@ void gfunc_call(int nb_args)
             gen_reg -= reg_count;
             r = gv(RC_INT);
             d = arg_prepare_reg(gen_reg);
-            orex(1,d,r,0x89); /* mov */
-            o(0xc0 + REG_VALUE(r) * 8 + REG_VALUE(d));
+            if (r != d) {
+                orex(1,d,r,0x89); /* mov */
+                o(0xc0 + REG_VALUE(r) * 8 + REG_VALUE(d));
+            }
             if (reg_count == 2) {
                 d = arg_prepare_reg(gen_reg+1);
-                orex(1,d,vtop->r2,0x89); /* mov */
-                o(0xc0 + REG_VALUE(vtop->r2) * 8 + REG_VALUE(d));
+                if (vtop->r2 != d) {
+                    orex(1,d,vtop->r2,0x89); /* mov */
+                    o(0xc0 + REG_VALUE(vtop->r2) * 8 + REG_VALUE(d));
+                }
             }
         }
         vtop--;
@@ -1701,8 +1707,14 @@ void gen_opi(int op)
             gv2(RC_INT, RC_INT);
             r = vtop[-1].r;
             fr = vtop[0].r;
-            orex(ll, r, fr, (opc << 3) | 0x01);
-            o(0xc0 + REG_VALUE(r) + REG_VALUE(fr) * 8);
+            if (fr == REG_IRET && r != REG_IRET && (op == '+' || op == '&' || op == '^' || op == '|')) {
+                orex(ll, fr, r, (opc << 3) | 0x01);
+                o(0xc0 + REG_VALUE(fr) + REG_VALUE(r) * 8);
+                vtop[-1].r = fr;
+            } else {
+                orex(ll, r, fr, (opc << 3) | 0x01);
+                o(0xc0 + REG_VALUE(r) + REG_VALUE(fr) * 8);
+            }
         }
         vtop--;
         if (op >= TOK_ULT && op <= TOK_GT)
@@ -1728,11 +1740,60 @@ void gen_opi(int op)
         opc = 1;
         goto gen_op8;
     case '*':
-        gv2(RC_INT, RC_INT);
-        r = vtop[-1].r;
-        fr = vtop[0].r;
-        orex(ll, fr, r, 0xaf0f); /* imul fr, r */
-        o(0xc0 + REG_VALUE(fr) + REG_VALUE(r) * 8);
+        if (cc && (!ll || (int)vtop->c.i == vtop->c.i)) {
+            vswap();
+            r = gv(RC_INT);
+            vswap();
+            c = vtop->c.i;
+            if (c == 0) {
+                orex(0, r, r, 0x31); /* xor r, r */
+                o(0xc0 + REG_VALUE(r) * 9);
+            } else if (c == 1) {
+                /* nop */
+            } else if (c == 2) {
+                orex(ll, r, r, 0x01); /* add r, r */
+                o(0xc0 + REG_VALUE(r) * 9);
+            } else if (c == 3) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 2), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0x40 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+            } else if (c == 5) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 4), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0x80 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+            } else if (c == 9) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 8), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+            } else if (c == 4 || c == 8 || c == 16 || c == 32 || c == 64 ||
+                       c == 128 || c == 256 || c == 512 || c == 1024 ||
+                       c == 2048 || c == 4096) {
+                int shift = 0, tmp = c;
+                while (tmp > 1) { shift++; tmp >>= 1; }
+                orex(ll, r, 0, 0xc1); /* shl $shift, r */
+                o(0xe0 | REG_VALUE(r));
+                g(shift);
+            } else if (c == (signed char)c) {
+                orex(ll, r, r, 0x6b); /* imul $imm8, r, r */
+                o(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+                g(c);
+            } else {
+                orex(ll, r, r, 0x69); /* imul $imm32, r, r */
+                oad(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(r), c);
+            }
+        } else {
+            gv2(RC_INT, RC_INT);
+            r = vtop[-1].r;
+            fr = vtop[0].r;
+            if (fr == REG_IRET && r != REG_IRET) {
+                orex(ll, r, fr, 0xaf0f); /* imul r, fr */
+                o(0xc0 + REG_VALUE(r) + REG_VALUE(fr) * 8);
+                vtop[-1].r = fr;
+            } else {
+                orex(ll, fr, r, 0xaf0f); /* imul fr, r */
+                o(0xc0 + REG_VALUE(fr) + REG_VALUE(r) * 8);
+            }
+        }
         vtop--;
         break;
     case TOK_SHL:

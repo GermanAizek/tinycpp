@@ -2651,6 +2651,38 @@ static void gen_opif(int op)
             v1->c.ld = f1;
         }
     } else {
+        if (c1 && (op == '+' || op == '*' || op == TOK_EQ || op == TOK_NE)) {
+            vswap();
+            c2 = c1;
+            c1 = 0;
+            v1 = vtop - 1;
+            v2 = vtop;
+        }
+        if (c2 && (v2->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+            if (bt == VT_FLOAT)
+                f2 = v2->c.f;
+            else if (bt == VT_DOUBLE)
+                f2 = v2->c.d;
+            else
+                f2 = v2->c.ld;
+
+            if (op == '*' && f2 == 2.0) {
+                vpop();
+                vdup();
+                gen_op('+');
+                return;
+            } else if (op == '*' && f2 == 1.0) {
+                vpop();
+                return;
+            } else if ((op == '+' || op == '-') && f2 == 0.0) {
+                vpop();
+                return;
+            } else if (op == '*' && f2 == -1.0) {
+                vpop();
+                gen_op(TOK_NEG);
+                return;
+            }
+        }
     general_case:
         if (op == TOK_NEG) {
             gen_negf(op);
