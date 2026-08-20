@@ -1694,8 +1694,19 @@ void gen_opi(int op)
             r = gv(RC_INT);
             vswap();
             c = vtop->c.i;
-            if (c == (signed char)c) {
-                /* XXX: generate inc and dec for smaller code ? */
+            if (c == 0 && opc == 7) {
+                /* cmp $0, %r -> test %r, %r */
+                orex(ll, r, r, 0x85);
+                o(0xc0 + REG_VALUE(r) * 9);
+            } else if (c == 1 && opc == 0) {
+                /* inc %r */
+                orex(ll, r, 0, 0xff);
+                o(0xc0 | REG_VALUE(r));
+            } else if (c == 1 && opc == 5) {
+                /* dec %r */
+                orex(ll, r, 0, 0xff);
+                o(0xc8 | REG_VALUE(r));
+            } else if (c == (signed char)c) {
                 orex(ll, r, 0, 0x83);
                 o(0xc0 | (opc << 3) | REG_VALUE(r));
                 g(c);
@@ -1808,12 +1819,19 @@ void gen_opi(int op)
         opc = 0xc0 | (opc << 3);
         if (cc) {
             /* constant case */
+            int shift;
             vswap();
             r = gv(RC_INT);
             vswap();
-            orex(ll, r, 0, 0xc1); /* shl/shr/sar $xxx, r */
-            o(opc | REG_VALUE(r));
-            g(vtop->c.i & (ll ? 63 : 31));
+            shift = vtop->c.i & (ll ? 63 : 31);
+            if (shift == 1) {
+                orex(ll, r, 0, 0xd1); /* shl/shr/sar $1, r */
+                o(opc | REG_VALUE(r));
+            } else {
+                orex(ll, r, 0, 0xc1); /* shl/shr/sar $xxx, r */
+                o(opc | REG_VALUE(r));
+                g(shift);
+            }
         } else {
             /* we generate the shift in ecx */
             gv2(RC_INT, RC_RCX);

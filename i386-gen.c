@@ -851,7 +851,11 @@ ST_FUNC void gen_opi(int op)
             r = gv(RC_INT);
             vswap();
             c = vtop->c.i;
-            if (c == (signed char)c) {
+            if (c == 0 && opc == 7) {
+                /* cmp $0, %r -> test %r, %r */
+                o(0x85);
+                o(0xc0 + r * 9);
+            } else if (c == (signed char)c) {
                 /* generate inc and dec for smaller code */
                 if ((c == 1 || c == -1) && (op == '+' || op == '-')) {
                     opc = (c == 1) ^ (op == '+');
