@@ -5534,8 +5534,10 @@ ST_FUNC void indir(void)
             return;
         expect("pointer");
     }
-    if (vtop->r & VT_LVAL)
+    if (vtop->r & VT_LVAL) {
         gv(RC_INT);
+        vtop->c.i = 0;
+    }
     vtop->type = *pointed_type(&vtop->type);
     /* Arrays and functions are never lvalues */
     if (!(vtop->type.t & (VT_ARRAY | VT_VLA))
@@ -6075,6 +6077,38 @@ ST_FUNC void unary(void)
         vpush(&type);
         CODE_OFF();
         break;
+#ifdef TCC_TARGET_X86_64
+    case TOK_builtin_sqrt:
+    case TOK_builtin_sqrtf:
+    case TOK_builtin_fabs:
+    case TOK_builtin_fabsf:
+        {
+            int is_double = (tok == TOK_builtin_sqrt || tok == TOK_builtin_fabs);
+            int do_fabs   = (tok == TOK_builtin_fabs || tok == TOK_builtin_fabsf);
+            next();
+            skip('(');
+            expr_eq();
+            skip(')');
+            /* Cast to the correct float type */
+            if (is_double) {
+                if ((vtop->type.t & VT_BTYPE) != VT_DOUBLE) {
+                    type.t = VT_DOUBLE;
+                    gen_cast(&type);
+                }
+                type.t = VT_DOUBLE;
+            } else {
+                if ((vtop->type.t & VT_BTYPE) != VT_FLOAT) {
+                    type.t = VT_FLOAT;
+                    gen_cast(&type);
+                }
+                type.t = VT_FLOAT;
+            }
+            vtop->type = type;
+            gen_inline_ssefunc(is_double, 0x51, do_fabs);
+            vtop->type = type;
+        }
+        break;
+#endif /* TCC_TARGET_X86_64 */
     case TOK_builtin_frame_address:
     case TOK_builtin_return_address:
         {
@@ -6516,7 +6550,7 @@ special_math_val:
             test_lvalue();
             /* expect pointer on structure */
             next();
-	    s = find_field(&vtop->type, tok, &cumofs);
+            s = find_field(&vtop->type, tok, &cumofs);
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
@@ -6659,6 +6693,48 @@ special_math_val:
 
             next();
             vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
+#ifdef TCC_TARGET_X86_64
+            {
+                int is_inline_math = 0;
+                int is_double_math = 1;
+                int is_fabs_math = 0;
+                if (nb_args == 1 && (vtop[-1].r & VT_SYM) && vtop[-1].sym) {
+                    const char *fname = get_tok_str(vtop[-1].sym->v, NULL);
+                    if (fname) {
+                        if (strcmp(fname, "sqrt") == 0 || strcmp(fname, "__builtin_sqrt") == 0) {
+                            is_inline_math = 1; is_double_math = 1; is_fabs_math = 0;
+                        } else if (strcmp(fname, "sqrtf") == 0 || strcmp(fname, "__builtin_sqrtf") == 0) {
+                            is_inline_math = 1; is_double_math = 0; is_fabs_math = 0;
+                        } else if (strcmp(fname, "fabs") == 0 || strcmp(fname, "__builtin_fabs") == 0) {
+                            is_inline_math = 1; is_double_math = 1; is_fabs_math = 1;
+                        } else if (strcmp(fname, "fabsf") == 0 || strcmp(fname, "__builtin_fabsf") == 0) {
+                            is_inline_math = 1; is_double_math = 0; is_fabs_math = 1;
+                        }
+                    }
+                }
+                if (is_inline_math) {
+                    if (is_double_math) {
+                        if ((vtop->type.t & VT_BTYPE) != VT_DOUBLE) {
+                            CType dt;
+                            memset(&dt, 0, sizeof(dt));
+                            dt.t = VT_DOUBLE;
+                            gen_cast(&dt);
+                        }
+                    } else {
+                        if ((vtop->type.t & VT_BTYPE) != VT_FLOAT) {
+                            CType ft;
+                            memset(&ft, 0, sizeof(ft));
+                            ft.t = VT_FLOAT;
+                            gen_cast(&ft);
+                        }
+                    }
+                    gen_inline_ssefunc(is_double_math, 0x51, is_fabs_math);
+                    vtop[-1] = vtop[0];
+                    vtop--;
+                    break;
+                }
+            }
+#endif
             gfunc_call(nb_args);
 
             if (ret_nregs < 0) {

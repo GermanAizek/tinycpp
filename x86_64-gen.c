@@ -2179,6 +2179,59 @@ void gen_opl(int op)
     gen_opi(op);
 }
 
+/* Emit inline SSE scalar unary operation:
+ * sqrtsd: f2 0f 51 /r  (double sqrt)
+ * sqrtss: f3 0f 51 /r  (float sqrt)
+ * fabs via andpd: f2 0f 10 -> andpd mask (clear sign bit)
+ *
+ * opc_prefix: 0xf2 for double, 0xf3 for float
+ * opc: 0x51 for sqrt
+ * is_fabs: if 1, emit andpd/andps to clear sign bit
+ */
+ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs)
+{
+    int r;
+    
+    /* Load the argument into an XMM register */
+    r = gv(RC_FLOAT);
+    
+    if (is_fabs) {
+        /* fabs: clear sign bit (bit 63 for double, bit 31 for float) */
+        int tmp = TREG_XMM7;
+        if (r == TREG_XMM7)
+            tmp = TREG_XMM6;
+        save_reg(tmp);
+        
+        if (is_double) {
+            /* pcmpeqd %tmp, %tmp -> 66 0f 76 c0+(tmp<<3)+tmp */
+            g(0x66); g(0x0f); g(0x76); g(0xc0 | (REG_VALUE(tmp) << 3) | REG_VALUE(tmp));
+            /* psrlq $1, %tmp -> 66 0f 73 d0+tmp 01 */
+            g(0x66); g(0x0f); g(0x73); g(0xd0 | REG_VALUE(tmp)); g(1);
+            /* andpd %tmp, %r -> 66 0f 54 c0+(r<<3)+tmp */
+            g(0x66); g(0x0f); g(0x54); g(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(tmp));
+        } else {
+            /* pcmpeqd %tmp, %tmp */
+            g(0x66); g(0x0f); g(0x76); g(0xc0 | (REG_VALUE(tmp) << 3) | REG_VALUE(tmp));
+            /* psrld $1, %tmp -> 66 0f 72 d0+tmp 01 */
+            g(0x66); g(0x0f); g(0x72); g(0xd0 | REG_VALUE(tmp)); g(1);
+            /* andps %tmp, %r -> 0f 54 c0+(r<<3)+tmp */
+            g(0x0f); g(0x54); g(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(tmp));
+        }
+    } else {
+        /* sqrtsd / sqrtss */
+        if (is_double) {
+            g(0xf2); /* sqrtsd */
+        } else {
+            g(0xf3); /* sqrtss */
+        }
+        g(0x0f);
+        g(opc); /* 0x51 */
+        g(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+    }
+    
+    vtop->r = r;
+}
+
 /* generate a floating point operation 'v = t1 op t2' instruction. The
    two operands are guaranteed to have the same floating point type */
 /* XXX: need to use ST1 too */
