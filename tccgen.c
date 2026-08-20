@@ -3155,6 +3155,18 @@ op_err:
                 gen_cast_s(VT_INT);
 #endif
             type1 = vtop[-1].type;
+#if defined(TCC_TARGET_X86_64)
+            if (tcc_state->optimize > 0 && op == '+' && !CONST_WANTED && !tcc_state->do_bounds_check) {
+                int psize = type_size(pointed_type(&vtop[-1].type), &align);
+                if (psize == 1 || psize == 2 || psize == 4 || psize == 8) {
+                    gen_cast_s(VT_LLONG);
+                    gen_lea(psize);
+                    type1.t &= ~(VT_ARRAY|VT_VLA);
+                    vtop->type = type1;
+                    goto done_ptr_op;
+                }
+            }
+#endif
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
@@ -3176,6 +3188,7 @@ op_err:
             type1.t &= ~(VT_ARRAY|VT_VLA);
             /* put again type if gen_opic() swaped operands */
             vtop->type = type1;
+        done_ptr_op: ;
         }
     } else {
         /* floats can only be used for a few operations */
@@ -6539,8 +6552,12 @@ special_math_val:
     /* post operations */
     while (1) {
         if (tok == TOK_INC || tok == TOK_DEC) {
-            inc(1, tok);
+            int t = tok;
             next();
+            if (tcc_state->optimize > 0 && (tok == ';' || tok == ')' || tok == ',' || tok == TOK_EOF))
+                inc(0, t);
+            else
+                inc(1, t);
         } else if (tok == '.' || tok == TOK_ARROW) {
             int qualifiers, cumofs;
             /* field */ 
@@ -7594,9 +7611,32 @@ static void gexpr_decl(void)
     }
 }
 
+static void save_for_expr(TokenString **str, int stop_tok)
+{
+    int level = 0;
+    *str = tok_str_alloc();
+    while (1) {
+        int t = tok;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file in for loop");
+        if (level == 0 && t == stop_tok)
+            break;
+        tok_str_add_tok(*str);
+        next();
+        if (t == '(' || t == '[' || t == '{')
+            level++;
+        else if (t == ')' || t == ']' || t == '}')
+            level--;
+    }
+    tok_str_add(*str, TOK_EOF);
+}
+
 static void block(int flags)
 {
     int a, b, c, d, e, t;
+    int init_jmp, body_lbl, has_cond, has_step, saved_tok;
+    CValue saved_tokc;
+    TokenString *cond_str, *step_str;
     struct scope o;
     Sym *s;
 
@@ -7735,27 +7775,78 @@ again:
             }
         }
         skip(';');
-        a = b = 0;
-        c = d = gind();
-        if (tok != ';') {
-            gexpr();
-            a = gvtst(1, 0);
+        if (tcc_state->optimize > 0 && !debug_modes) {
+            cond_str = NULL;
+            step_str = NULL;
+            has_cond = (tok != ';');
+            if (has_cond)
+                save_for_expr(&cond_str, ';');
+            skip(';');
+            has_step = (tok != ')');
+            if (has_step)
+                save_for_expr(&step_str, ')');
+            skip(')');
+
+            init_jmp = 0;
+            if (has_cond)
+                init_jmp = gjmp(0);
+
+            body_lbl = gind();
+            a = b = 0;
+            lblock(&a, &b);
+            saved_tok = tok;
+            saved_tokc = tokc;
+
+            gsym(b);
+            if (has_step) {
+                begin_macro(step_str, 1);
+                next();
+                gexpr();
+                vpop();
+                end_macro();
+            }
+
+            if (init_jmp)
+                gsym(init_jmp);
+
+            if (has_cond) {
+                begin_macro(cond_str, 1);
+                next();
+                gexpr();
+                c = gvtst(0, 0);
+                gsym_addr(c, body_lbl);
+                end_macro();
+            } else {
+                gjmp_addr(body_lbl);
+            }
+
+            tok = saved_tok;
+            tokc = saved_tokc;
+            gsym(a);
+            prev_scope(&o, 0);
+        } else {
+            a = b = 0;
+            c = d = gind();
+            if (tok != ';') {
+                gexpr();
+                a = gvtst(1, 0);
+            }
+            skip(';');
+            if (tok != ')') {
+                e = gjmp(0);
+                d = gind();
+                gexpr();
+                vpop();
+                gjmp_addr(c);
+                gsym(e);
+            }
+            skip(')');
+            lblock(&a, &b);
+            gjmp_addr(d);
+            gsym_addr(b, d);
+            gsym(a);
+            prev_scope(&o, 0);
         }
-        skip(';');
-        if (tok != ')') {
-            e = gjmp(0);
-            d = gind();
-            gexpr();
-            vpop();
-            gjmp_addr(c);
-            gsym(e);
-        }
-        skip(')');
-        lblock(&a, &b);
-        gjmp_addr(d);
-        gsym_addr(b, d);
-        gsym(a);
-        prev_scope(&o, 0);
 
     } else if (t == TOK_DO) {
         new_scope_s(&o);

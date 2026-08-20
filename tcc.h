@@ -1649,6 +1649,7 @@ ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);
 ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs);
+ST_FUNC void gen_lea(int scale);
 ST_FUNC void ggoto(void);
 #ifndef TCC_TARGET_C67
 ST_FUNC void o(unsigned int c);

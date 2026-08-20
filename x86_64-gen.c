@@ -370,6 +370,13 @@ static void gen_modrm32(int opcode, int op_reg, int r, Sym *sym, int c)
     gen_modrm_impl(opcode, 0, op_reg, r, sym, c);
 }
 
+static struct {
+    int offset;
+    int reg;
+    int is64;
+    int ind;
+} last_local_store = { 0, 0, 0, -1 };
+
 /* load 'r' from value 'sv' */
 void load(int r, SValue *sv)
 {
@@ -472,6 +479,16 @@ void load(int r, SValue *sv)
                 );
             ll = is64_type(ft);
             b = 0x8b;
+        }
+        if (tcc_state->optimize > 0 && (fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && fc == (signed char)fc) {
+            uint8_t *p = cur_text_section->data + ind;
+            if (!ll) {
+                if (ind >= 3 && p[-3] == 0x89 && p[-2] == (0x45 | (REG_VALUE(r) << 3)) && p[-1] == (uint8_t)fc)
+                    return;
+            } else {
+                if (ind >= 4 && (p[-4] & 0xf8) == 0x48 && p[-3] == 0x89 && p[-2] == (0x45 | (REG_VALUE(r) << 3)) && p[-1] == (uint8_t)fc)
+                    return;
+            }
         }
         gen_modrm_impl(b, ll, r, fr, sv->sym, fc);
     } else {
@@ -623,6 +640,14 @@ void store(int r, SValue *v)
             ll = 1;
     }
     gen_modrm_impl(opc, ll, r, fr, v->sym, fc);
+    if ((fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && opc == 0x89) {
+        last_local_store.offset = fc;
+        last_local_store.reg = r;
+        last_local_store.is64 = ll;
+        last_local_store.ind = ind;
+    } else {
+        last_local_store.ind = -1;
+    }
 }
 
 /* 'is_jmp' is '1' if it is a jump */
@@ -1888,6 +1913,44 @@ static int try_optimize_rotate(int op, int ll)
     return 1;
 }
 
+static int find_fast_div_u32(uint32_t d, uint64_t *out_m, int *out_s)
+{
+    int s;
+    if (d <= 1)
+        return 0;
+    if ((d & (d - 1)) == 0) {
+        int shift = 0;
+        uint32_t tmp = d;
+        while (tmp > 1) { shift++; tmp >>= 1; }
+        *out_m = 1;
+        *out_s = shift;
+        return 1; /* power of 2 */
+    }
+    for (s = 32; s < 64; s++) {
+        uint64_t two_s = 1ULL << s;
+        uint64_t rem = two_s % d;
+        uint64_t e = d - rem;
+        if (e <= (1ULL << (s - 32))) {
+            *out_m = (two_s + d - 1) / d;
+            *out_s = s;
+            return 2; /* magic multiplier */
+        }
+    }
+    return 0;
+}
+
+static int find_fast_div_s32(int32_t d, int32_t *out_m, int *out_s)
+{
+    if (d <= 1 && d >= -1)
+        return 0;
+    if (d == 10) { *out_m = 0x66666667; *out_s = 34; return 1; }
+    if (d == 100) { *out_m = 0x51eb851f; *out_s = 37; return 1; }
+    if (d == 1000) { *out_m = 0x10624dd3; *out_s = 38; return 1; }
+    if (d == 10000) { *out_m = (int32_t)0xd1b71759; *out_s = 45; return 1; }
+    if (d == 10000000) { *out_m = (int32_t)0x6b5fca6b; *out_s = 54; return 1; }
+    return 0;
+}
+
 /* generate an integer binary operation */
 void gen_opi(int op)
 {
@@ -2104,52 +2167,124 @@ void gen_opi(int op)
     case TOK_PDIV:
         uu = 0;
     divmod:
-        if (!ll && !uu && cc) {
-            int c = vtop->c.i;
-            int m = 0, shift = 0;
-            if (c == 10) {
-                m = 0x66666667; shift = 34;
-            } else if (c == 100) {
-                m = 0x51eb851f; shift = 37;
-            } else if (c == 1000) {
-                m = 0x10624dd3; shift = 38;
-            }
-            if (m != 0) {
-                vswap();
-                gv(RC_RAX);
-                vswap();
-                vtop--;
-                save_reg(TREG_RDX);
-                save_reg(TREG_RCX);
-                /* movslq %eax, %rax */
-                o(0xc06348);
-                /* imul $m, %rax, %rdx */
-                orex(1, TREG_RDX, TREG_RAX, 0x69);
-                oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RAX), m);
-                /* sar $shift, %rdx */
-                orex(1, TREG_RDX, 0, 0xc1);
-                o(0xf8 | REG_VALUE(TREG_RDX));
-                g(shift);
-                /* mov %eax, %ecx; shr $31, %ecx; add %ecx, %edx */
-                o(0xc189);
-                o(0xe9c1); g(31);
-                o(0xca01);
-                if (op == '%' || op == TOK_UMOD) {
-                    /* edx = edx * c; eax = eax - edx */
-                    if (c == (signed char)c) {
-                        orex(0, TREG_RDX, TREG_RDX, 0x6b);
-                        o(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX));
-                        g(c);
+        if (!ll && cc && vtop->c.i > 0) {
+            uint32_t c = (uint32_t)vtop->c.i;
+            if (uu) {
+                uint64_t m = 0;
+                int shift = 0;
+                int kind = find_fast_div_u32(c, &m, &shift);
+                if (kind == 1) {
+                    /* power of 2 */
+                    vswap();
+                    gv(RC_RAX);
+                    vswap();
+                    vtop--;
+                    if (op == '%' || op == TOK_UMOD) {
+                        /* and $(c - 1), %eax */
+                        if ((c - 1) <= 127) {
+                            orex(0, TREG_RAX, 0, 0x83);
+                            o(0xe0);
+                            g(c - 1);
+                        } else {
+                            orex(0, TREG_RAX, 0, 0x25);
+                            gen_le32(c - 1);
+                        }
                     } else {
-                        orex(0, TREG_RDX, TREG_RDX, 0x69);
-                        oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX), c);
+                        /* shr $shift, %eax */
+                        orex(0, TREG_RAX, 0, 0xc1);
+                        o(0xe8);
+                        g(shift);
                     }
-                    o(0xd029); /* sub %edx, %eax */
                     vtop->r = TREG_RAX;
-                } else {
-                    vtop->r = TREG_RDX;
+                    break;
+                } else if (kind == 2) {
+                    vswap();
+                    gv(RC_RAX);
+                    vswap();
+                    vtop--;
+                    save_reg(TREG_RDX);
+                    /* zero-extend %eax into %rax: mov %eax, %eax */
+                    o(0xc089);
+                    if (m <= 0x7fffffffULL) {
+                        /* imul $m, %rax, %rdx */
+                        orex(1, TREG_RDX, TREG_RAX, 0x69);
+                        oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RAX), (int)m);
+                    } else if (m < 0x100000000ULL) {
+                        /* mov $m, %edx */
+                        orex(0, TREG_RDX, 0, 0xb8 + REG_VALUE(TREG_RDX));
+                        gen_le32((uint32_t)m);
+                        /* imul %rax, %rdx */
+                        orex(1, TREG_RDX, TREG_RAX, 0xaf0f);
+                        o(0xc0 + REG_VALUE(TREG_RAX) + REG_VALUE(TREG_RDX) * 8);
+                    } else {
+                        /* movabs $m, %rdx */
+                        orex(1, TREG_RDX, 0, 0xb8 + REG_VALUE(TREG_RDX));
+                        gen_le64(m);
+                        /* imul %rax, %rdx */
+                        orex(1, TREG_RDX, TREG_RAX, 0xaf0f);
+                        o(0xc0 + REG_VALUE(TREG_RAX) + REG_VALUE(TREG_RDX) * 8);
+                    }
+                    /* shr $shift, %rdx */
+                    orex(1, TREG_RDX, 0, 0xc1);
+                    o(0xe8 | REG_VALUE(TREG_RDX));
+                    g(shift);
+                    if (op == '%' || op == TOK_UMOD) {
+                        /* edx = edx * c; eax = eax - edx */
+                        if (c == (signed char)c) {
+                            orex(0, TREG_RDX, TREG_RDX, 0x6b);
+                            o(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX));
+                            g(c);
+                        } else {
+                            orex(0, TREG_RDX, TREG_RDX, 0x69);
+                            oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX), c);
+                        }
+                        o(0xd029); /* sub %edx, %eax */
+                        vtop->r = TREG_RAX;
+                    } else {
+                        vtop->r = TREG_RDX;
+                    }
+                    break;
                 }
-                break;
+            } else {
+                int32_t m = 0;
+                int shift = 0;
+                if (find_fast_div_s32((int32_t)c, &m, &shift)) {
+                    vswap();
+                    gv(RC_RAX);
+                    vswap();
+                    vtop--;
+                    save_reg(TREG_RDX);
+                    save_reg(TREG_RCX);
+                    /* movslq %eax, %rax */
+                    o(0xc06348);
+                    /* imul $m, %rax, %rdx */
+                    orex(1, TREG_RDX, TREG_RAX, 0x69);
+                    oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RAX), m);
+                    /* sar $shift, %rdx */
+                    orex(1, TREG_RDX, 0, 0xc1);
+                    o(0xf8 | REG_VALUE(TREG_RDX));
+                    g(shift);
+                    /* mov %eax, %ecx; shr $31, %ecx; add %ecx, %edx */
+                    o(0xc189);
+                    o(0xe9c1); g(31);
+                    o(0xca01);
+                    if (op == '%' || op == TOK_UMOD) {
+                        /* edx = edx * c; eax = eax - edx */
+                        if (c == (signed char)c) {
+                            orex(0, TREG_RDX, TREG_RDX, 0x6b);
+                            o(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX));
+                            g(c);
+                        } else {
+                            orex(0, TREG_RDX, TREG_RDX, 0x69);
+                            oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX), c);
+                        }
+                        o(0xd029); /* sub %edx, %eax */
+                        vtop->r = TREG_RAX;
+                    } else {
+                        vtop->r = TREG_RDX;
+                    }
+                    break;
+                }
             }
         }
         /* first operand must be in eax */
@@ -2177,6 +2312,25 @@ void gen_opi(int op)
 void gen_opl(int op)
 {
     gen_opi(op);
+}
+
+ST_FUNC void gen_lea(int scale)
+{
+    int r, fr, shift, rex, modrm, sib;
+    gv2(RC_INT, RC_INT);
+    r = vtop[-1].r;
+    fr = vtop[0].r;
+    shift = (scale == 2 ? 1 : (scale == 4 ? 2 : (scale == 8 ? 3 : 0)));
+    if (shift == 0) {
+        orex(1, r, fr, 0x01);
+        o(0xc0 + REG_VALUE(r) + REG_VALUE(fr) * 8);
+    } else {
+        rex = 0x48 | (REX_BASE(r) << 2) | (REX_BASE(fr) << 1) | REX_BASE(r);
+        modrm = 0x04 | (REG_VALUE(r) << 3);
+        sib = (shift << 6) | (REG_VALUE(fr) << 3) | REG_VALUE(r);
+        g(rex); g(0x8d); g(modrm); g(sib);
+    }
+    vtop--;
 }
 
 /* Emit inline SSE scalar unary operation:
