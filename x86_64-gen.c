@@ -380,7 +380,7 @@ static struct {
 static int reg_local_offset[NB_REGS];
 static int reg_local_is64[NB_REGS];
 
-static void clear_local_reg_cache(void)
+ST_FUNC void clear_local_reg_cache(void)
 {
     memset(reg_local_offset, 0, sizeof(reg_local_offset));
     memset(reg_local_is64, 0, sizeof(reg_local_is64));
@@ -404,6 +404,13 @@ static void invalidate_local_offset(int fc)
             reg_local_is64[i] = 0;
         }
     }
+}
+
+ST_FUNC int is_reg_cached(int r)
+{
+    if (tcc_state->optimize > 0 && r >= 0 && r < NB_REGS)
+        return reg_local_offset[r] != 0;
+    return 0;
 }
 
 /* load 'r' from value 'sv' */

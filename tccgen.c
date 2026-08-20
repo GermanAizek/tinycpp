@@ -180,6 +180,7 @@ ST_FUNC void gsym(int t)
     gsym_addr(t, ind);
     CODE_ON();
   }
+  clear_local_reg_cache();
 }
 
 /* Clear 'nocode_wanted' if current pc is a label */
@@ -187,6 +188,7 @@ static int gind()
 {
   int t = ind;
   CODE_ON();
+  clear_local_reg_cache();
   if (debug_modes)
     tcc_tcov_block_begin(tcc_state);
   return t;
@@ -1499,7 +1501,22 @@ ST_FUNC int get_reg(int rc)
     int r;
     SValue *p;
 
-    /* find a free register */
+    /* first pass: find a free register that is not currently holding a cached local variable */
+    for(r=0;r<NB_REGS;r++) {
+        if ((reg_classes[r] & rc) && !is_reg_cached(r)) {
+            if (nocode_wanted)
+                return r;
+            for(p=vstack;p<=vtop;p++) {
+                if ((p->r & VT_VALMASK) == r ||
+                    p->r2 == r)
+                    goto notfound1;
+            }
+            return r;
+        }
+    notfound1: ;
+    }
+
+    /* second pass: find any free register */
     for(r=0;r<NB_REGS;r++) {
         if (reg_classes[r] & rc) {
             if (nocode_wanted)
@@ -1507,11 +1524,11 @@ ST_FUNC int get_reg(int rc)
             for(p=vstack;p<=vtop;p++) {
                 if ((p->r & VT_VALMASK) == r ||
                     p->r2 == r)
-                    goto notfound;
+                    goto notfound2;
             }
             return r;
         }
-    notfound: ;
+    notfound2: ;
     }
     
     /* no register left : free the first one on the stack (VERY
