@@ -1678,12 +1678,52 @@ ST_FUNC int gjmp_cond(int op, int t)
         return t;
 }
 
+static int match_eval_sequences(uint8_t *eval1, int len1, uint8_t *eval2, int len2)
+{
+    int i1 = 0, i2 = 0;
+    uint8_t b1, b2;
+    while (i1 < len1 && i2 < len2) {
+        /* Skip spill instruction in eval2 if present */
+        if (i2 + 7 <= len2 && (eval2[i2] & 0xf0) == 0x40 && eval2[i2+1] == 0x89 && (eval2[i2+2] & 0xc0) == 0x80) {
+            i2 += 7;
+            continue;
+        }
+        if (i2 + 3 <= len2 && eval2[i2] == 0x89 && (eval2[i2+1] & 0xc0) == 0x40) {
+            i2 += 3;
+            continue;
+        }
+        if (i2 + 8 <= len2 && (eval2[i2] & 0xf0) == 0x40 && eval2[i2+1] == 0x89 && (eval2[i2+2] & 0xc0) == 0x80 && (eval2[i2+2] & 7) == 4) {
+            i2 += 8;
+            continue;
+        }
+        
+        b1 = eval1[i1];
+        b2 = eval2[i2];
+        
+        if (b1 != b2) {
+            /* Allow register differences in ModR/M or REX bytes */
+            if ((b1 & 0xc0) == 0xc0 && (b2 & 0xc0) == 0xc0) {
+                /* Register-register ModR/M */
+            } else if ((b1 & 0xc0) == (b2 & 0xc0) && (b1 & 0xc0) != 0) {
+                /* Displaced ModR/M with different reg */
+            } else if ((b1 & 0xf0) == 0x40 && (b2 & 0xf0) == 0x40) {
+                /* REX prefix */
+            } else {
+                return 0;
+            }
+        }
+        i1++;
+        i2++;
+    }
+    return (i1 == len1);
+}
+
 static int try_optimize_rotate(int op, int ll)
 {
     uint8_t *data;
     uint8_t *p;
     int r, fr;
-    int sz2, sz1;
+    int sz1;
     int opc2, opc1, s2, s1;
     uint8_t *p_shift2, *p_shift1;
     
@@ -1698,9 +1738,8 @@ static int try_optimize_rotate(int op, int ll)
     if (r < 0 || r >= 16 || fr < 0 || fr >= 16 || r == fr)
         return 0;
         
-    /* Check shift2 ending at p */
+    /* 1. Identify shift2 ending at p */
     p_shift2 = NULL;
-    sz2 = 0;
     opc2 = -1;
     s2 = 0;
     
@@ -1709,7 +1748,6 @@ static int try_optimize_rotate(int op, int ll)
         if ((modrm & 7) == REG_VALUE(fr) && (modrm & 0xc0) == 0xc0) {
             opc2 = (modrm >> 3) & 7;
             s2 = p[-1];
-            sz2 = 3;
             p_shift2 = p - 3;
         }
     } else if (ind >= 4 && (p[-4] & 0xf0) == 0x40 && p[-3] == 0xc1) {
@@ -1717,7 +1755,6 @@ static int try_optimize_rotate(int op, int ll)
         if ((modrm & 7) == REG_VALUE(fr) && (modrm & 0xc0) == 0xc0) {
             opc2 = (modrm >> 3) & 7;
             s2 = p[-1];
-            sz2 = 4;
             p_shift2 = p - 4;
         }
     } else if (ind >= 2 && p[-2] == 0xd1) {
@@ -1725,7 +1762,6 @@ static int try_optimize_rotate(int op, int ll)
         if ((modrm & 7) == REG_VALUE(fr) && (modrm & 0xc0) == 0xc0) {
             opc2 = (modrm >> 3) & 7;
             s2 = 1;
-            sz2 = 2;
             p_shift2 = p - 2;
         }
     } else if (ind >= 3 && (p[-3] & 0xf0) == 0x40 && p[-2] == 0xd1) {
@@ -1733,7 +1769,6 @@ static int try_optimize_rotate(int op, int ll)
         if ((modrm & 7) == REG_VALUE(fr) && (modrm & 0xc0) == 0xc0) {
             opc2 = (modrm >> 3) & 7;
             s2 = 1;
-            sz2 = 3;
             p_shift2 = p - 3;
         }
     }
@@ -1741,88 +1776,102 @@ static int try_optimize_rotate(int op, int ll)
     if (!p_shift2 || (opc2 != 4 && opc2 != 5))
         return 0;
         
-    /* shift1 must immediately precede the evaluation for shift2 */
-    /* Check single load instruction (2 to 7 bytes) between shift1 and shift2 */
+    /* 2. Find shift1 before p_shift2 (eval_len from 2 up to 48 bytes) */
     p_shift1 = NULL;
     sz1 = 0;
     opc1 = -1;
     s1 = 0;
     
-    for (int eval_len = 2; eval_len <= 7; eval_len++) {
+    for (int eval_len = 2; eval_len <= 48; eval_len++) {
+        int cur_sz = 0;
+        int cur_opc = -1;
+        int cur_s = 0;
         uint8_t *scan = p_shift2 - eval_len;
+        if (scan < data)
+            break;
+        
         if (scan - data >= 3 && scan[-3] == 0xc1) {
             int modrm = scan[-2];
             if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-                opc1 = (modrm >> 3) & 7;
-                s1 = scan[-1];
-                sz1 = 3;
-                p_shift1 = scan - 3;
+                cur_opc = (modrm >> 3) & 7;
+                cur_s = scan[-1];
+                cur_sz = 3;
             }
         } else if (scan - data >= 4 && (scan[-4] & 0xf0) == 0x40 && scan[-3] == 0xc1) {
             int modrm = scan[-2];
             if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-                opc1 = (modrm >> 3) & 7;
-                s1 = scan[-1];
-                sz1 = 4;
-                p_shift1 = scan - 4;
+                cur_opc = (modrm >> 3) & 7;
+                cur_s = scan[-1];
+                cur_sz = 4;
             }
         } else if (scan - data >= 2 && scan[-2] == 0xd1) {
             int modrm = scan[-1];
             if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-                opc1 = (modrm >> 3) & 7;
-                s1 = 1;
-                sz1 = 2;
-                p_shift1 = scan - 2;
+                cur_opc = (modrm >> 3) & 7;
+                cur_s = 1;
+                cur_sz = 2;
             }
         } else if (scan - data >= 3 && (scan[-3] & 0xf0) == 0x40 && scan[-2] == 0xd1) {
             int modrm = scan[-1];
             if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-                opc1 = (modrm >> 3) & 7;
-                s1 = 1;
-                sz1 = 3;
-                p_shift1 = scan - 3;
+                cur_opc = (modrm >> 3) & 7;
+                cur_s = 1;
+                cur_sz = 3;
             }
         }
         
-        if (p_shift1 && p_shift1 + sz1 == scan) {
-            /* Found candidate shift1! Check that load1 (before shift1) matches load2 (before shift2) */
-            uint8_t *p_load2 = scan;
-            uint8_t *p_load1 = p_shift1 - eval_len;
-            if (p_load1 >= data) {
+        if (cur_sz > 0 && (cur_opc == 4 || cur_opc == 5)) {
+            if (((cur_opc == 5 && opc2 == 4) || (cur_opc == 4 && opc2 == 5)) &&
+                (cur_s + s2 == (ll ? 64 : 32))) {
+                
+                uint8_t *cand_shift1 = scan - cur_sz;
                 int match = 0;
-                if (eval_len == 3 || eval_len == 4) {
-                    if (p_load1[eval_len - 1] == p_load2[eval_len - 1] &&
-                        (p_load1[eval_len - 2] & 7) == (p_load2[eval_len - 2] & 7))
-                        match = 1;
-                } else if (eval_len == 6 || eval_len == 7) {
-                    if (memcmp(p_load1 + eval_len - 4, p_load2 + eval_len - 4, 4) == 0 &&
-                        (p_load1[eval_len - 5] & 7) == (p_load2[eval_len - 5] & 7))
-                        match = 1;
-                } else if (eval_len == 2) {
-                    if (((p_load1[eval_len - 1] >> 3) & 7) == ((p_load2[eval_len - 1] >> 3) & 7))
-                        match = 1;
+                if (eval_len <= 7) {
+                    /* Direct load matching */
+                    uint8_t *p_load2 = scan;
+                    uint8_t *p_load1 = cand_shift1 - eval_len;
+                    if (p_load1 >= data) {
+                        if (eval_len == 3 || eval_len == 4) {
+                            if (p_load1[eval_len - 1] == p_load2[eval_len - 1] &&
+                                (p_load1[eval_len - 2] & 7) == (p_load2[eval_len - 2] & 7))
+                                match = 1;
+                        } else if (eval_len == 6 || eval_len == 7) {
+                            if (memcmp(p_load1 + eval_len - 4, p_load2 + eval_len - 4, 4) == 0 &&
+                                (p_load1[eval_len - 5] & 7) == (p_load2[eval_len - 5] & 7))
+                                match = 1;
+                        } else if (eval_len == 2) {
+                            if (((p_load1[eval_len - 1] >> 3) & 7) == ((p_load2[eval_len - 1] >> 3) & 7))
+                                match = 1;
+                        }
+                    }
+                } else {
+                    /* Indexed / multi-instruction subexpression matching */
+                    /* Scan backwards before cand_shift1 for candidate eval1 */
+                    for (int l1 = eval_len - 8; l1 <= eval_len; l1++) {
+                        if (cand_shift1 - l1 >= data) {
+                            if (match_eval_sequences(cand_shift1 - l1, l1, scan, eval_len)) {
+                                match = 1;
+                                break;
+                            }
+                        }
+                    }
                 }
-                if (match)
+                
+                if (match) {
+                    p_shift1 = cand_shift1;
+                    sz1 = cur_sz;
+                    opc1 = cur_opc;
+                    s1 = cur_s;
                     break;
+                }
             }
-            p_shift1 = NULL;
         }
     }
     
-    if (!p_shift1 || (opc1 != 4 && opc1 != 5))
-        return 0;
-        
-    /* Shift opcodes must be opposite: one SHL (4) and one SHR (5) */
-    if ((opc1 == 5 && opc2 != 4) || (opc1 == 4 && opc2 != 5))
-        return 0;
-        
-    /* Total shift must equal word size (32 or 64) */
-    if (s1 + s2 != (ll ? 64 : 32))
+    if (!p_shift1)
         return 0;
         
     /* Match! Transform shift1 into rotate! */
-    /* If shift1 was SHR (5), rotate is ROR (1) */
-    /* If shift1 was SHL (4), rotate is ROL (0) */
     {
         int new_opc = (opc1 == 5) ? 1 : 0;
         if (sz1 == 3 || sz1 == 4) {
