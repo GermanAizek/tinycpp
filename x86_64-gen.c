@@ -1415,8 +1415,8 @@ void gfunc_call(int nb_args)
             /* XXX: implicit cast ? */
             int d;
             gen_reg -= reg_count;
-            r = gv(RC_INT);
             d = arg_prepare_reg(gen_reg);
+            r = gv(reg_classes[d]);
             if (r != d) {
                 orex(1,d,r,0x89); /* mov */
                 o(0xc0 + REG_VALUE(r) * 8 + REG_VALUE(d));
@@ -2331,6 +2331,20 @@ ST_FUNC void gen_lea(int scale)
         g(rex); g(0x8d); g(modrm); g(sib);
     }
     vtop--;
+}
+
+ST_FUNC void gen_add_const(int c)
+{
+    int r = gv(RC_INT);
+    if (c == (signed char)c) {
+        orex(1, r, 0, 0x83);
+        o(0xc0 | REG_VALUE(r));
+        g(c);
+    } else {
+        orex(1, r, 0, 0x81);
+        oad(0xc0 | REG_VALUE(r), c);
+    }
+    vtop->r = r;
 }
 
 /* Emit inline SSE scalar unary operation:

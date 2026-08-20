@@ -3158,7 +3158,15 @@ op_err:
 #if defined(TCC_TARGET_X86_64)
             if (tcc_state->optimize > 0 && op == '+' && !CONST_WANTED && !tcc_state->do_bounds_check) {
                 int psize = type_size(pointed_type(&vtop[-1].type), &align);
-                if (psize == 1 || psize == 2 || psize == 4 || psize == 8) {
+                if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+                    int c = (int)vtop->c.i * psize;
+                    vtop--;
+                    if (c != 0)
+                        gen_add_const(c);
+                    type1.t &= ~(VT_ARRAY|VT_VLA);
+                    vtop->type = type1;
+                    goto done_ptr_op;
+                } else if (psize == 1 || psize == 2 || psize == 4 || psize == 8) {
                     gen_cast_s(VT_LLONG);
                     gen_lea(psize);
                     type1.t &= ~(VT_ARRAY|VT_VLA);
@@ -6568,11 +6576,37 @@ special_math_val:
             /* expect pointer on structure */
             next();
             s = find_field(&vtop->type, tok, &cumofs);
+#ifdef CONFIG_TCC_BCHECK
+            if (tcc_state->optimize > 0 && !tcc_state->do_bounds_check) {
+#else
+            if (tcc_state->optimize > 0) {
+#endif
+                if (cumofs == 0) {
+                    vtop->type = s->type;
+                    if (qualifiers)
+                        parse_btype_qualify(&vtop->type, qualifiers);
+                    if (vtop->type.t & VT_ARRAY)
+                        vtop->r &= ~VT_LVAL;
+                    next();
+                    continue;
+                } else if ((vtop->r & VT_LVAL) && (vtop->r & (VT_VALMASK | VT_SYM)) == VT_LOCAL) {
+                    vtop->type = s->type;
+                    vtop->c.i += cumofs;
+                    if (qualifiers)
+                        parse_btype_qualify(&vtop->type, qualifiers);
+                    if (vtop->type.t & VT_ARRAY)
+                        vtop->r &= ~VT_LVAL;
+                    next();
+                    continue;
+                }
+            }
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
-            vpushi(cumofs);
-            gen_op('+');
+            if (cumofs != 0) {
+                vpushi(cumofs);
+                gen_op('+');
+            }
             /* change type to field type, and set to lvalue */
             vtop->type = s->type;
             if (qualifiers)
