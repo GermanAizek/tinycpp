@@ -508,8 +508,13 @@ void load(int r, SValue *sv)
                     o(0xc0 + REG_VALUE(r) * 9);
                 }
             } else {
-                orex(0,r,0, 0xb8 + REG_VALUE(r)); /* mov $xx, r */
-                gen_le32(fc);
+                if (fc == 0) {
+                    orex(0, r, r, 0x31); /* xor r, r */
+                    o(0xc0 + REG_VALUE(r) * 9);
+                } else {
+                    orex(0,r,0, 0xb8 + REG_VALUE(r)); /* mov $xx, r */
+                    gen_le32(fc);
+                }
             }
         } else if (v == VT_LOCAL) {
             gen_modrm64(0x8d, r, VT_LOCAL, sv->sym, fc);
@@ -1706,6 +1711,10 @@ void gen_opi(int op)
                 /* dec %r */
                 orex(ll, r, 0, 0xff);
                 o(0xc8 | REG_VALUE(r));
+            } else if (c == 0xffff && opc == 4 && !ll) {
+                /* and $0xffff, %eax -> movzwl %ax, %eax */
+                orex(0, r, r, 0xb70f);
+                o(0xc0 + REG_VALUE(r) * 9);
             } else if (c == (signed char)c) {
                 orex(ll, r, 0, 0x83);
                 o(0xc0 | (opc << 3) | REG_VALUE(r));

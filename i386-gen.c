@@ -381,8 +381,13 @@ ST_FUNC void load(int r, SValue *sv)
             }
 #endif
         } else if (v == VT_CONST) {
-            o(0xb8 + r); /* mov $xx, r */
-            gen_addr32(fr, sv->sym, fc);
+            if (!(fr & VT_SYM) && fc == 0) {
+                o(0x31); /* xor r, r */
+                o(0xc0 + r * 9);
+            } else {
+                o(0xb8 + r); /* mov $xx, r */
+                gen_addr32(fr, sv->sym, fc);
+            }
         } else if (v == VT_LOCAL) {
             if (fc) {
                 /* lea xxx(%ebp), r */

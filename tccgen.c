@@ -6381,12 +6381,8 @@ special_math_val:
             vpop();
         }
         skip(')');
-        vpushi(0);
-        vtop->type.t = VT_VOID;
-        vtop->type.ref = NULL;
-        mk_pointer(&vtop->type);
-        break;
     case TOK_NEW: {
+        CType type;
         int align, sz;
         if (!tcc_state->cplusplus)
             goto tok_identifier;
