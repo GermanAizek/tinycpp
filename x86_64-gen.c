@@ -377,6 +377,35 @@ static struct {
     int ind;
 } last_local_store = { 0, 0, 0, -1 };
 
+static int reg_local_offset[NB_REGS];
+static int reg_local_is64[NB_REGS];
+
+static void clear_local_reg_cache(void)
+{
+    memset(reg_local_offset, 0, sizeof(reg_local_offset));
+    memset(reg_local_is64, 0, sizeof(reg_local_is64));
+    last_local_store.ind = -1;
+}
+
+static void invalidate_reg_cache(int r)
+{
+    if (r >= 0 && r < NB_REGS) {
+        reg_local_offset[r] = 0;
+        reg_local_is64[r] = 0;
+    }
+}
+
+static void invalidate_local_offset(int fc)
+{
+    int i;
+    for (i = 0; i < NB_REGS; i++) {
+        if (reg_local_offset[i] == fc) {
+            reg_local_offset[i] = 0;
+            reg_local_is64[i] = 0;
+        }
+    }
+}
+
 /* load 'r' from value 'sv' */
 void load(int r, SValue *sv)
 {
@@ -481,17 +510,30 @@ void load(int r, SValue *sv)
             b = 0x8b;
         }
         if (tcc_state->optimize > 0 && (fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && fc == (signed char)fc) {
-            uint8_t *p = cur_text_section->data + ind;
-            if (!ll) {
-                if (ind >= 3 && p[-3] == 0x89 && p[-2] == (0x45 | (REG_VALUE(r) << 3)) && p[-1] == (uint8_t)fc)
-                    return;
-            } else {
-                if (ind >= 4 && (p[-4] & 0xf8) == 0x48 && p[-3] == 0x89 && p[-2] == (0x45 | (REG_VALUE(r) << 3)) && p[-1] == (uint8_t)fc)
-                    return;
+            if (reg_local_offset[r] == fc && reg_local_is64[r] == ll)
+                return;
+            if (r < 16) {
+                int src;
+                for (src = 0; src < 16; src++) {
+                    if (src != r && reg_local_offset[src] == fc && reg_local_is64[src] == ll) {
+                        orex(ll, r, src, 0x89);
+                        o(0xc0 + REG_VALUE(r) + REG_VALUE(src) * 8);
+                        reg_local_offset[r] = fc;
+                        reg_local_is64[r] = ll;
+                        return;
+                    }
+                }
             }
         }
         gen_modrm_impl(b, ll, r, fr, sv->sym, fc);
+        if (tcc_state->optimize > 0 && (fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && fc == (signed char)fc && r < NB_REGS) {
+            reg_local_offset[r] = fc;
+            reg_local_is64[r] = ll;
+        } else {
+            invalidate_reg_cache(r);
+        }
     } else {
+        invalidate_reg_cache(r);
         if (v == VT_CONST) {
             if (fr & VT_SYM) {
 #ifdef TCC_TARGET_PE
@@ -645,8 +687,18 @@ void store(int r, SValue *v)
         last_local_store.reg = r;
         last_local_store.is64 = ll;
         last_local_store.ind = ind;
+        if (tcc_state->optimize > 0 && fc == (signed char)fc) {
+            invalidate_local_offset(fc);
+            if (r < NB_REGS) {
+                reg_local_offset[r] = fc;
+                reg_local_is64[r] = ll;
+            }
+        }
     } else {
         last_local_store.ind = -1;
+        if (tcc_state->optimize > 0 && (fr & VT_LVAL) && (fr & VT_VALMASK) == VT_LOCAL) {
+            invalidate_local_offset(fc);
+        }
     }
 }
 
@@ -654,6 +706,7 @@ void store(int r, SValue *v)
 static void gcall_or_jmp(int is_jmp)
 {
     int r;
+    clear_local_reg_cache();
     if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST &&
 	((vtop->r & VT_SYM) && (vtop->c.i-4) == (int)(vtop->c.i-4))) {
         /* constant symbolic case -> simple relocation */
@@ -1455,6 +1508,10 @@ void gfunc_call(int nb_args)
 static void push_arg_reg(int i) {
     loc -= 8;
     gen_modrm64(0x89, arg_regs[i], VT_LOCAL, NULL, loc);
+    if (tcc_state->optimize > 0 && arg_regs[i] < NB_REGS) {
+        reg_local_offset[arg_regs[i]] = loc;
+        reg_local_is64[arg_regs[i]] = 1;
+    }
 }
 
 /* generate function prolog of type 't' */
@@ -1466,6 +1523,8 @@ void gfunc_prolog(Sym *func_sym)
     int param_addr = 0, reg_param_index, sse_param_index;
     Sym *sym;
     CType *type;
+
+    clear_local_reg_cache();
 
     sym = func_type->ref;
     addr = PTR_SIZE * 2;
@@ -1647,6 +1706,7 @@ ST_FUNC void gen_fill_nops(int bytes)
 /* generate a jump to a label */
 int gjmp(int t)
 {
+    clear_local_reg_cache();
     return gjmp2(0xe9, t);
 }
 
@@ -1654,6 +1714,7 @@ int gjmp(int t)
 void gjmp_addr(int a)
 {
     int r;
+    clear_local_reg_cache();
     r = a - ind - 2;
     if (r == (signed char)r) {
         g(0xeb);
@@ -1679,6 +1740,7 @@ ST_FUNC int gjmp_append(int n, int t)
 
 ST_FUNC int gjmp_cond(int op, int t)
 {
+        clear_local_reg_cache();
         if (op & 0x100)
 	  {
 	    /* This was a float compare.  If the parity flag is set
@@ -2330,6 +2392,7 @@ ST_FUNC void gen_lea(int scale)
         sib = (shift << 6) | (REG_VALUE(fr) << 3) | REG_VALUE(r);
         g(rex); g(0x8d); g(modrm); g(sib);
     }
+    invalidate_reg_cache(r);
     vtop--;
 }
 
@@ -2344,6 +2407,7 @@ ST_FUNC void gen_add_const(int c)
         orex(1, r, 0, 0x81);
         oad(0xc0 | REG_VALUE(r), c);
     }
+    invalidate_reg_cache(r);
     vtop->r = r;
 }
 
