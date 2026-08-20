@@ -2406,7 +2406,17 @@ ST_FUNC void gen_struct_copy(int size)
     o(0x5756); /* push rsi, rdi */
 #endif
     gv2(RC_RDI, RC_RSI);
-    if (n <= 4) {
+    if (size == 16) {
+        /* 128-bit SIMD SSE move */
+        o(0x100f); g(0x06); /* movups (%rsi), %xmm0 */
+        o(0x110f); g(0x07); /* movups %xmm0, (%rdi) */
+    } else if (size == 32) {
+        /* 256-bit SIMD (2x 128-bit SSE) move */
+        o(0x100f); g(0x06); /* movups (%rsi), %xmm0 */
+        o(0x110f); g(0x07); /* movups %xmm0, (%rdi) */
+        o(0x100f); g(0x46); g(0x10); /* movups 0x10(%rsi), %xmm0 */
+        o(0x110f); g(0x47); g(0x10); /* movups %xmm0, 0x10(%rdi) */
+    } else if (n <= 4) {
         while (n)
             o(0xa548), --n;
     } else {
@@ -2415,12 +2425,14 @@ ST_FUNC void gen_struct_copy(int size)
         o(0xa548f3);
         vpop();
     }
-    if (size & 0x04)
-        o(0xa5);
-    if (size & 0x02)
-        o(0xa566);
-    if (size & 0x01)
-        o(0xa4);
+    if (size != 16 && size != 32) {
+        if (size & 0x04)
+            o(0xa5);
+        if (size & 0x02)
+            o(0xa566);
+        if (size & 0x01)
+            o(0xa4);
+    }
 #ifdef TCC_TARGET_PE
     o(0x5e5f); /* pop rdi, rsi */
 #endif
