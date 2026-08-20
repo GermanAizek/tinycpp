@@ -1683,9 +1683,9 @@ static int try_optimize_rotate(int op, int ll)
     uint8_t *data;
     uint8_t *p;
     int r, fr;
-    int sz2, sz1, sz_load2, sz_load1;
+    int sz2, sz1;
     int opc2, opc1, s2, s1;
-    uint8_t *p_shift2, *p_load2, *p_shift1, *p_load1;
+    uint8_t *p_shift2, *p_shift1;
     
     if (op != '|' && op != '^')
         return 0;
@@ -1741,66 +1741,71 @@ static int try_optimize_rotate(int op, int ll)
     if (!p_shift2 || (opc2 != 4 && opc2 != 5))
         return 0;
         
-    /* Identify load2 immediately before shift2 */
-    p_load2 = p_shift2;
-    sz_load2 = 0;
-    
-    if (p_load2 - data >= 3 && p_load2[-3] == 0x8b && (p_load2[-2] & 0xc0) == 0x40 && ((p_load2[-2] >> 3) & 7) == REG_VALUE(fr)) {
-        sz_load2 = 3;
-    } else if (p_load2 - data >= 4 && (p_load2[-4] & 0xf0) == 0x40 && p_load2[-3] == 0x8b && (p_load2[-2] & 0xc0) == 0x40 && ((p_load2[-2] >> 3) & 7) == REG_VALUE(fr)) {
-        sz_load2 = 4;
-    } else if (p_load2 - data >= 6 && p_load2[-6] == 0x8b && (p_load2[-5] & 0xc0) == 0x80 && ((p_load2[-5] >> 3) & 7) == REG_VALUE(fr)) {
-        sz_load2 = 6;
-    } else if (p_load2 - data >= 7 && (p_load2[-7] & 0xf0) == 0x40 && p_load2[-6] == 0x8b && (p_load2[-5] & 0xc0) == 0x80 && ((p_load2[-5] >> 3) & 7) == REG_VALUE(fr)) {
-        sz_load2 = 7;
-    } else if (p_load2 - data >= 2 && p_load2[-2] == 0x89 && (p_load2[-1] & 0xc0) == 0xc0 && (p_load2[-1] & 7) == REG_VALUE(fr)) {
-        sz_load2 = 2;
-    } else if (p_load2 - data >= 3 && (p_load2[-3] & 0xf0) == 0x40 && p_load2[-2] == 0x89 && (p_load2[-1] & 0xc0) == 0xc0 && (p_load2[-1] & 7) == REG_VALUE(fr)) {
-        sz_load2 = 3;
-    }
-    
-    if (sz_load2 == 0)
-        return 0;
-        
-    p_load2 = p_shift2 - sz_load2;
-    
-    /* Check shift1 immediately before load2 */
+    /* shift1 must immediately precede the evaluation for shift2 */
+    /* Check single load instruction (2 to 7 bytes) between shift1 and shift2 */
     p_shift1 = NULL;
     sz1 = 0;
     opc1 = -1;
     s1 = 0;
     
-    if (p_load2 - data >= 3 && p_load2[-3] == 0xc1) {
-        int modrm = p_load2[-2];
-        if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-            opc1 = (modrm >> 3) & 7;
-            s1 = p_load2[-1];
-            sz1 = 3;
-            p_shift1 = p_load2 - 3;
+    for (int eval_len = 2; eval_len <= 7; eval_len++) {
+        uint8_t *scan = p_shift2 - eval_len;
+        if (scan - data >= 3 && scan[-3] == 0xc1) {
+            int modrm = scan[-2];
+            if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
+                opc1 = (modrm >> 3) & 7;
+                s1 = scan[-1];
+                sz1 = 3;
+                p_shift1 = scan - 3;
+            }
+        } else if (scan - data >= 4 && (scan[-4] & 0xf0) == 0x40 && scan[-3] == 0xc1) {
+            int modrm = scan[-2];
+            if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
+                opc1 = (modrm >> 3) & 7;
+                s1 = scan[-1];
+                sz1 = 4;
+                p_shift1 = scan - 4;
+            }
+        } else if (scan - data >= 2 && scan[-2] == 0xd1) {
+            int modrm = scan[-1];
+            if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
+                opc1 = (modrm >> 3) & 7;
+                s1 = 1;
+                sz1 = 2;
+                p_shift1 = scan - 2;
+            }
+        } else if (scan - data >= 3 && (scan[-3] & 0xf0) == 0x40 && scan[-2] == 0xd1) {
+            int modrm = scan[-1];
+            if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
+                opc1 = (modrm >> 3) & 7;
+                s1 = 1;
+                sz1 = 3;
+                p_shift1 = scan - 3;
+            }
         }
-    } else if (p_load2 - data >= 4 && (p_load2[-4] & 0xf0) == 0x40 && p_load2[-3] == 0xc1) {
-        int modrm = p_load2[-2];
-        if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-            opc1 = (modrm >> 3) & 7;
-            s1 = p_load2[-1];
-            sz1 = 4;
-            p_shift1 = p_load2 - 4;
-        }
-    } else if (p_load2 - data >= 2 && p_load2[-2] == 0xd1) {
-        int modrm = p_load2[-1];
-        if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-            opc1 = (modrm >> 3) & 7;
-            s1 = 1;
-            sz1 = 2;
-            p_shift1 = p_load2 - 2;
-        }
-    } else if (p_load2 - data >= 3 && (p_load2[-3] & 0xf0) == 0x40 && p_load2[-2] == 0xd1) {
-        int modrm = p_load2[-1];
-        if ((modrm & 7) == REG_VALUE(r) && (modrm & 0xc0) == 0xc0) {
-            opc1 = (modrm >> 3) & 7;
-            s1 = 1;
-            sz1 = 3;
-            p_shift1 = p_load2 - 3;
+        
+        if (p_shift1 && p_shift1 + sz1 == scan) {
+            /* Found candidate shift1! Check that load1 (before shift1) matches load2 (before shift2) */
+            uint8_t *p_load2 = scan;
+            uint8_t *p_load1 = p_shift1 - eval_len;
+            if (p_load1 >= data) {
+                int match = 0;
+                if (eval_len == 3 || eval_len == 4) {
+                    if (p_load1[eval_len - 1] == p_load2[eval_len - 1] &&
+                        (p_load1[eval_len - 2] & 7) == (p_load2[eval_len - 2] & 7))
+                        match = 1;
+                } else if (eval_len == 6 || eval_len == 7) {
+                    if (memcmp(p_load1 + eval_len - 4, p_load2 + eval_len - 4, 4) == 0 &&
+                        (p_load1[eval_len - 5] & 7) == (p_load2[eval_len - 5] & 7))
+                        match = 1;
+                } else if (eval_len == 2) {
+                    if (((p_load1[eval_len - 1] >> 3) & 7) == ((p_load2[eval_len - 1] >> 3) & 7))
+                        match = 1;
+                }
+                if (match)
+                    break;
+            }
+            p_shift1 = NULL;
         }
     }
     
@@ -1815,40 +1820,6 @@ static int try_optimize_rotate(int op, int ll)
     if (s1 + s2 != (ll ? 64 : 32))
         return 0;
         
-    /* Identify load1 immediately before shift1 */
-    p_load1 = p_shift1;
-    sz_load1 = 0;
-    
-    if (p_load1 - data >= 3 && p_load1[-3] == 0x8b && (p_load1[-2] & 0xc0) == 0x40 && ((p_load1[-2] >> 3) & 7) == REG_VALUE(r)) {
-        sz_load1 = 3;
-    } else if (p_load1 - data >= 4 && (p_load1[-4] & 0xf0) == 0x40 && p_load1[-3] == 0x8b && (p_load1[-2] & 0xc0) == 0x40 && ((p_load1[-2] >> 3) & 7) == REG_VALUE(r)) {
-        sz_load1 = 4;
-    } else if (p_load1 - data >= 6 && p_load1[-6] == 0x8b && (p_load1[-5] & 0xc0) == 0x80 && ((p_load1[-5] >> 3) & 7) == REG_VALUE(r)) {
-        sz_load1 = 6;
-    } else if (p_load1 - data >= 7 && (p_load1[-7] & 0xf0) == 0x40 && p_load1[-6] == 0x8b && (p_load1[-5] & 0xc0) == 0x80 && ((p_load1[-5] >> 3) & 7) == REG_VALUE(r)) {
-        sz_load1 = 7;
-    } else if (p_load1 - data >= 2 && p_load1[-2] == 0x89 && (p_load1[-1] & 0xc0) == 0xc0 && (p_load1[-1] & 7) == REG_VALUE(r)) {
-        sz_load1 = 2;
-    } else if (p_load1 - data >= 3 && (p_load1[-3] & 0xf0) == 0x40 && p_load1[-2] == 0x89 && (p_load1[-1] & 0xc0) == 0xc0 && (p_load1[-1] & 7) == REG_VALUE(r)) {
-        sz_load1 = 3;
-    }
-    
-    if (sz_load1 == 0 || sz_load1 != sz_load2)
-        return 0;
-        
-    p_load1 = p_shift1 - sz_load1;
-    
-    /* Check that load1 and load2 loaded from identical source */
-    if (sz_load1 == 3 || sz_load1 == 4) {
-        if (p_load1[sz_load1 - 1] != p_load2[sz_load2 - 1]) return 0;
-        if ((p_load1[sz_load1 - 2] & 7) != (p_load2[sz_load2 - 2] & 7)) return 0;
-    } else if (sz_load1 == 6 || sz_load1 == 7) {
-        if (memcmp(p_load1 + sz_load1 - 4, p_load2 + sz_load2 - 4, 4) != 0) return 0;
-        if ((p_load1[sz_load1 - 5] & 7) != (p_load2[sz_load2 - 5] & 7)) return 0;
-    } else if (sz_load1 == 2 || sz_load1 == 3) {
-        if (((p_load1[sz_load1 - 1] >> 3) & 7) != ((p_load2[sz_load2 - 1] >> 3) & 7)) return 0;
-    }
-    
     /* Match! Transform shift1 into rotate! */
     /* If shift1 was SHR (5), rotate is ROR (1) */
     /* If shift1 was SHL (4), rotate is ROL (0) */
@@ -1863,6 +1834,7 @@ static int try_optimize_rotate(int op, int ll)
     
     /* Rewind code generation pointer ind to end of shift1 */
     ind = (int)(p_shift1 + sz1 - data);
+    vtop[-1].r = r;
     vtop--;
     return 1;
 }
@@ -1888,7 +1860,17 @@ void gen_opi(int op)
             r = gv(RC_INT);
             vswap();
             c = vtop->c.i;
-            if (c == 0 && opc == 7) {
+            if (c == 0 && (opc == 0 || opc == 5 || opc == 1 || opc == 6)) {
+                /* add/sub/or/xor $0, %r -> NOP */
+            } else if (c == 0 && opc == 4) {
+                /* and $0, %r -> xor %r, %r */
+                orex(0, r, r, 0x31);
+                o(0xc0 + REG_VALUE(r) * 9);
+            } else if (c == -1 && opc == 6) {
+                /* xor $-1, %r -> not %r */
+                orex(ll, r, 0, 0xf7);
+                o(0xd0 | REG_VALUE(r));
+            } else if (c == 0 && opc == 7) {
                 /* cmp $0, %r -> test %r, %r */
                 orex(ll, r, r, 0x85);
                 o(0xc0 + REG_VALUE(r) * 9);
@@ -1900,6 +1882,10 @@ void gen_opi(int op)
                 /* dec %r */
                 orex(ll, r, 0, 0xff);
                 o(0xc8 | REG_VALUE(r));
+            } else if (c == 0xff && opc == 4 && !ll) {
+                /* and $0xff, %eax -> movzbl %al, %eax */
+                orex(0, r, r, 0xb60f);
+                o(0xc0 + REG_VALUE(r) * 9);
             } else if (c == 0xffff && opc == 4 && !ll) {
                 /* and $0xffff, %eax -> movzwl %ax, %eax */
                 orex(0, r, r, 0xb70f);
