@@ -1,0 +1,4 @@
+static_cast: 3
+reinterpret_cast: 0x12345678
+const_cast: 100
+dynamic_cast: non-null

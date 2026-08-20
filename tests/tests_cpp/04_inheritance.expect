@@ -1,0 +1,2 @@
+Derived: a=10, b=20, c=30, sizeof=12
+MultiLevel: a=1, b=2, c=3, d=4, sizeof=16

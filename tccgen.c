@@ -58,6 +58,15 @@ ST_DATA int nocode_wanted; /* no code generation wanted */
 #define CODE_OFF() if(!nocode_wanted)(nocode_wanted |= CODE_OFF_BIT)
 #define CODE_ON() (nocode_wanted &= ~CODE_OFF_BIT)
 
+static inline int is_ident(int t)
+{
+    if (t >= TOK_UIDENT)
+        return 1;
+    if (tcc_state && !tcc_state->cplusplus && t >= TOK_CLASS && t <= TOK_CONSTEXPR)
+        return 1;
+    return 0;
+}
+
 /* no code output when parsing sizeof()/typeof() etc. (using nocode_wanted++/--) */
 #define NOEVAL_MASK 0x0000FFFF
 #define NOEVAL_WANTED (nocode_wanted & NOEVAL_MASK)
@@ -74,7 +83,8 @@ ST_DATA int func_vc; /* stack address for implicit struct return storage */
 ST_DATA int func_ind; /* function start address */
 static int func_old;
 ST_DATA const char *funcname;
-ST_DATA CType int_type, func_old_type, char_type, char_pointer_type;
+ST_DATA CType int_type, func_old_type, char_pointer_type;
+static CType char_type;
 static CString initstr;
 
 #if PTR_SIZE == 4
@@ -2895,7 +2905,16 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
         type2 = pointed_type(type2);
         return is_compatible_types(type1, type2);
     } else if (bt1 == VT_STRUCT) {
-        return (type1->ref == type2->ref);
+        if (type1->ref == type2->ref)
+            return 1;
+        if (tcc_state->cplusplus) {
+            Sym *s;
+            for (s = type2->ref ? type2->ref->base_class : NULL; s; s = s->base_class) {
+                if (s == type1->ref)
+                    return 1;
+            }
+        }
+        return 0;
     } else if (bt1 == VT_FUNC) {
         return is_compatible_func(type1, type2);
     } else {
@@ -4145,7 +4164,7 @@ static Sym * find_field (CType *type, int v, int *cumofs)
     if (!(v & SYM_FIELD)) { /* top-level call */
         if ((type->t & VT_BTYPE) != VT_STRUCT)
             expect("struct or union");
-        if (v < TOK_UIDENT)
+        if (!is_ident(v))
             expect("field name");
         if (s->c < 0)
             tcc_error("dereferencing incomplete type '%s'",
@@ -4450,7 +4469,7 @@ static void struct_decl(CType *type, int u)
 {
     int v, c, size, align, flexible;
     int bit_size, bsize, bt, ut;
-    Sym *s, *ss, **ps;
+    Sym *s, *ss, **ps, *base_sym = NULL;
     AttributeDef ad, ad1;
     CType type1, btype;
 
@@ -4461,6 +4480,16 @@ static void struct_decl(CType *type, int u)
     v = 0;
     if (tok >= TOK_IDENT) /* struct/enum tag */
         v = tok, next();
+
+    if (tcc_state->cplusplus && tok == ':') {
+        next();
+        if (tok == TOK_PUBLIC || tok == TOK_PRIVATE || tok == TOK_PROTECTED)
+            next();
+        if (is_ident(tok)) {
+            base_sym = struct_find(tok);
+            next();
+        }
+    }
 
     bt = ut = 0;
     if (u == VT_ENUM) {
@@ -4494,6 +4523,7 @@ static void struct_decl(CType *type, int u)
     type1.ref = NULL;
     /* we put an undefined size for struct/union */
     s = sym_push(v | SYM_STRUCT, &type1, 0, bt ? 0 : -1);
+    s->base_class = base_sym;
     s->r = 0; /* default alignment is zero as gcc */
 do_decl:
     type->t = s->type.t;
@@ -4519,7 +4549,7 @@ do_decl:
                 t.t = bt|VT_STATIC|VT_ENUM_VAL;
             for(;;) {
                 v = tok;
-                if (v < TOK_UIDENT)
+                if (!is_ident(v))
                     expect("identifier");
                 next();
                 if (tok == '=') {
@@ -4563,12 +4593,12 @@ do_decl:
 
             /* set type for enum members */
             for (ss = s->next; ss; ss = ss->next) {
-                ll = ss->enum_val;
-                if (ll == (int)ll) /* default is int if it fits */
+                long long vll = ss->enum_val;
+                if (vll == (int)vll)
                     continue;
                 if (t.t & VT_UNSIGNED) {
                     ss->type.t |= VT_UNSIGNED;
-                    if (ll == (unsigned)ll)
+                    if (vll == (unsigned)vll)
                         continue;
                 }
                 ss->type.t = (ss->type.t & ~VT_BTYPE)
@@ -4581,10 +4611,31 @@ do_decl:
         } else {
             c = 0;
             flexible = 0;
+            if (base_sym && base_sym->c > 0) {
+                Sym *bf;
+                for (bf = base_sym->next; bf; bf = bf->next) {
+                    if (bf->v) {
+                        ss = sym_push2(ps, bf->v, bf->type.t, bf->c);
+                        ss->type = bf->type;
+                        ps = &ss->next;
+                    }
+                }
+                c = base_sym->c;
+            }
             while (tok != '}') {
+                if (tok == TOK_PUBLIC || tok == TOK_PRIVATE || tok == TOK_PROTECTED) {
+                    next();
+                    skip(':');
+                    continue;
+                }
                 if (!parse_btype(&btype, &ad1, 0)) {
                     if (tok == TOK_STATIC_ASSERT) {
                         do_Static_assert();
+                        continue;
+                    }
+                    if (tok == TOK_PUBLIC || tok == TOK_PRIVATE || tok == TOK_PROTECTED) {
+                        next();
+                        skip(':');
                         continue;
                     }
 		    skip(';');
@@ -4600,6 +4651,23 @@ do_decl:
                     if (tok != ':') {
 			if (tok != ';')
                             type_decl(&type1, &ad1, &v, TYPE_DIRECT);
+                        if ((type1.t & VT_BTYPE) == VT_FUNC) {
+                            if (tok == '{') {
+                                int depth = 1;
+                                next();
+                                while (depth > 0 && tok != TOK_EOF) {
+                                    if (tok == '{') depth++;
+                                    else if (tok == '}') depth--;
+                                    next();
+                                }
+                                if (tok == ';')
+                                    next();
+                                break;
+                            } else if (tok == ';') {
+                                next();
+                                break;
+                            }
+                        }
                         if (v == 0) {
                     	    if ((type1.t & VT_BTYPE) != VT_STRUCT)
                         	expect("identifier");
@@ -4618,8 +4686,7 @@ do_decl:
 			        tcc_error("field '%s' has incomplete type",
                                       get_tok_str(v, NULL));
                         }
-                        if ((type1.t & VT_BTYPE) == VT_FUNC ||
-			    (type1.t & VT_BTYPE) == VT_VOID ||
+                        if ((type1.t & VT_BTYPE) == VT_VOID ||
                             (type1.t & VT_STORAGE))
                             tcc_error("invalid type for '%s'", 
                                   get_tok_str(v, NULL));
@@ -4684,7 +4751,8 @@ do_decl:
                         break;
                     skip(',');
                 }
-                skip(';');
+                if (tok == ';')
+                    next();
             }
             skip('}');
 	    parse_attribute(&ad);
@@ -4805,6 +4873,11 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         case TOK_BOOL:
             u = VT_BOOL;
             goto basic_type;
+        case TOK_BOOL_CPP:
+            if (!tcc_state->cplusplus)
+                goto default_ident;
+            u = VT_BOOL;
+            goto basic_type;
         case TOK_COMPLEX:
             tcc_error("_Complex is not yet supported");
         case TOK_FLOAT:
@@ -4825,11 +4898,35 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             u = type1.t;
             type->ref = type1.ref;
             goto basic_type1;
+        case TOK_CLASS:
+            if (!tcc_state->cplusplus)
+                goto default_ident;
+            struct_decl(&type1, VT_STRUCT);
+            goto basic_type2;
         case TOK_STRUCT:
             struct_decl(&type1, VT_STRUCT);
             goto basic_type2;
         case TOK_UNION:
             struct_decl(&type1, VT_UNION);
+            goto basic_type2;
+        case TOK_TYPENAME:
+        case TOK_VIRTUAL:
+        case TOK_EXPLICIT:
+        case TOK_FRIEND:
+        case TOK_MUTABLE:
+        case TOK_CONSTEXPR:
+        case TOK_NOEXCEPT:
+            if (!tcc_state->cplusplus)
+                goto default_ident;
+            next();
+            break;
+        case TOK_DECLTYPE:
+            if (!tcc_state->cplusplus)
+                goto default_ident;
+            next();
+            skip('(');
+            parse_expr_type(&type1);
+            skip(')');
             goto basic_type2;
 
             /* type modifiers */
@@ -4944,11 +5041,76 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         default:
+        default_ident:
             if (typespec_found)
                 goto the_end;
+            if (tcc_state->cplusplus && tok == TOK_TWOCOLONS) {
+                next();
+            }
             s = sym_find(tok);
-            if (!s || !(s->type.t & VT_TYPEDEF))
+            if (!s || !(s->type.t & VT_TYPEDEF)) {
+                if (tcc_state->cplusplus) {
+                    Sym *st_sym = struct_find(tok);
+                    if (st_sym) {
+                        n = tok, next();
+                        while (tok == TOK_TWOCOLONS) {
+                            next();
+                            if (tok >= TOK_IDENT) {
+                                Sym *s2 = struct_find(tok);
+                                if (s2) st_sym = s2;
+                                next();
+                            }
+                        }
+                        if (tok == ':' && ignore_label) {
+                            unget_tok(n);
+                            goto the_end;
+                        }
+                        t &= ~(VT_BTYPE|VT_LONG);
+                        u = t & ~(VT_CONSTANT | VT_VOLATILE), t ^= u;
+                        type->t = st_sym->type.t | u;
+                        type->ref = st_sym;
+                        if (t)
+                            parse_btype_qualify(type, t);
+                        t = type->t;
+                        typespec_found = 1;
+                        st = bt = -2;
+                        break;
+                    } else if (is_ident(tok)) {
+                        int save_ident = tok;
+                        next();
+                        if (tok == TOK_TWOCOLONS) {
+                            while (tok == TOK_TWOCOLONS) {
+                                next();
+                                if (is_ident(tok)) {
+                                    save_ident = tok;
+                                    next();
+                                }
+                            }
+                            st_sym = struct_find(save_ident);
+                            if (st_sym) {
+                                t &= ~(VT_BTYPE|VT_LONG);
+                                u = t & ~(VT_CONSTANT | VT_VOLATILE), t ^= u;
+                                type->t = st_sym->type.t | u;
+                                type->ref = st_sym;
+                                if (t)
+                                    parse_btype_qualify(type, t);
+                                t = type->t;
+                                typespec_found = 1;
+                                st = bt = -2;
+                                break;
+                            } else {
+                                s = sym_find(save_ident);
+                                if (s && (s->type.t & VT_TYPEDEF)) {
+                                    goto have_typedef;
+                                }
+                            }
+                        }
+                        unget_tok(save_ident);
+                    }
+                }
                 goto the_end;
+            }
+        have_typedef:
 
             n = tok, next();
             if (tok == ':' && ignore_label) {
@@ -5080,7 +5242,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                     pt.ref = NULL;
                     next();
                 }
-                if (n < TOK_UIDENT)
+                if (!is_ident(n))
                     expect("identifier");
                 convert_parameter_type(&pt);
                 arg_size += (type_size(&pt, &align) + PTR_SIZE - 1) / PTR_SIZE;
@@ -5089,6 +5251,11 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                 s = sym_push(n, &pt, VT_LOCAL|VT_LVAL, 0);
                 *plast = s;
                 plast = &s->next;
+                if (tok == '=') {
+                    next();
+                    s->c = expr_const();
+                    s->r |= VT_CONST;
+                }
                 if (tok == ')')
                     break;
                 skip(',');
@@ -5254,8 +5421,16 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
     type->t &= ~VT_STORAGE;
     post = ret = type;
 
-    while (tok == '*') {
+    while (tok == '*' || tok == '&' || tok == TOK_LAND) {
         qualifiers = 0;
+        if (tok == '&' || tok == TOK_LAND) {
+            next();
+            mk_pointer(type);
+            type->t |= VT_REF;
+            if (ret == type)
+                ret = pointed_type(type);
+            continue;
+        }
     redo:
         next();
         switch(tok) {
@@ -5366,6 +5541,10 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
     } else {
         type = arg->type;
         type.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
+        if (tcc_state->cplusplus && (type.t & VT_REF)) {
+            mk_pointer(&vtop->type);
+            gaddrof();
+        }
         gen_assign_cast(&type);
     }
 }
@@ -6023,7 +6202,7 @@ ST_FUNC void unary(void)
             goto tok_identifier;
         next();
         /* allow to take the address of a label */
-        if (tok < TOK_UIDENT)
+        if (!is_ident(tok))
             expect("label identifier");
         s = label_find(tok);
         if (!s) {
@@ -6120,12 +6299,138 @@ special_math_val:
 	n = 0x7f800000;
 	goto special_math_val;
 
+    case TOK_TRUE:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        vpushi(1);
+        vtop->type.t = VT_BOOL;
+        next();
+        break;
+    case TOK_FALSE:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        vpushi(0);
+        vtop->type.t = VT_BOOL;
+        next();
+        break;
+    case TOK_NULLPTR:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        vpushi(0);
+        vtop->type.t = VT_VOID;
+        vtop->type.ref = NULL;
+        mk_pointer(&vtop->type);
+        next();
+        break;
+    case TOK_STATIC_CAST:
+    case TOK_REINTERPRET_CAST:
+    case TOK_CONST_CAST:
+    case TOK_DYNAMIC_CAST:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        next();
+        skip(TOK_LT);
+        parse_type(&type);
+        skip(TOK_GT);
+        skip('(');
+        gexpr();
+        gen_cast(&type);
+        skip(')');
+        break;
+    case TOK_TYPEID:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        next();
+        skip('(');
+        if (parse_btype(&type, &ad, 0)) {
+            type_decl(&type, &ad, &n, TYPE_ABSTRACT);
+        } else {
+            gexpr();
+            vpop();
+        }
+        skip(')');
+        vpushi(0);
+        vtop->type.t = VT_VOID;
+        vtop->type.ref = NULL;
+        mk_pointer(&vtop->type);
+        break;
+    case TOK_NEW: {
+        int align, sz;
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        next();
+        parse_type(&type);
+        vpush_helper_func(tok_alloc_const("malloc"));
+        if (tok == '[') {
+            next();
+            gexpr();
+            skip(']');
+            sz = type_size(&type, &align);
+            vpushs(sz);
+            gen_op('*');
+        } else {
+            sz = type_size(&type, &align);
+            vpushs(sz);
+            if (tok == '(') {
+                next();
+                skip(')');
+            }
+        }
+        gfunc_call(1);
+        vpushi(0);
+        vtop->r = REG_IRET;
+        if (type.t & VT_ARRAY) {
+            type = *pointed_type(&type);
+        }
+        mk_pointer(&type);
+        vtop->type = type;
+        break;
+    }
+    case TOK_DELETE:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        next();
+        if (tok == '[') {
+            next();
+            skip(']');
+        }
+        vpush_helper_func(tok_alloc_const("free"));
+        unary();
+        gfunc_call(1);
+        vpushi(0);
+        vtop->type.t = VT_VOID;
+        break;
+    case TOK_TWOCOLONS:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        next();
+        goto tok_identifier;
+    case TOK_THIS:
+        if (!tcc_state->cplusplus)
+            goto tok_identifier;
+        t = tok;
+        next();
+        s = sym_find(t);
+        if (s) {
+            vpushsym(&s->type, s);
+        } else {
+            tcc_error("'this' unavailable outside member function");
+        }
+        break;
+
     default:
     tok_identifier:
-        if (tok < TOK_UIDENT)
+        if (!is_ident(tok))
             tcc_error("expression expected before '%s'", get_tok_str(tok, &tokc));
         t = tok;
         next();
+        while (tcc_state->cplusplus && tok == TOK_TWOCOLONS) {
+            next();
+            if (tok >= TOK_IDENT) {
+                t = tok;
+                next();
+            }
+        }
         s = sym_find(t);
         if (!s || IS_ASM_SYM(s)) {
             const char *name = get_tok_str(t, NULL);
@@ -6150,6 +6455,9 @@ special_math_val:
 	   Will be used by at least the x86 inline asm parser for
 	   regvars.  */
 	vtop->sym = s;
+        if (tcc_state->cplusplus && (s->type.t & VT_REF)) {
+            indir();
+        }
 
         if (r & VT_SYM) {
             vtop->c.i = 0;
@@ -6293,6 +6601,14 @@ special_math_val:
                     if (tok == ')')
                         break;
                     skip(',');
+                }
+            }
+            if (tcc_state->cplusplus) {
+                while (sa && (sa->r & VT_CONST)) {
+                    vpushi(sa->c);
+                    gfunc_param_typed(s, sa);
+                    nb_args++;
+                    sa = sa->next;
                 }
             }
             if (sa)
@@ -7232,7 +7548,7 @@ again:
         while (tok == TOK_LABEL) {
             do {
                 next();
-                if (tok < TOK_UIDENT)
+                if (!is_ident(tok))
                     expect("label identifier");
                 label_push(&local_label_stack, tok, LABEL_DECLARED);
                 next();
@@ -7434,7 +7750,7 @@ again:
                 expect("pointer");
             ggoto();
 
-        } else if (tok >= TOK_UIDENT) {
+        } else if (is_ident(tok)) {
 	    s = label_find(tok);
 	    /* put forward definition if needed */
             if (!s)
@@ -7465,8 +7781,27 @@ again:
     } else if (t == TOK_ASM1 || t == TOK_ASM2 || t == TOK_ASM3) {
         asm_instr();
 
+    } else if (tcc_state->cplusplus && t == TOK_TRY) {
+        block(flags);
+        while (tok == TOK_CATCH) {
+            next();
+            skip('(');
+            while (tok != ')' && tok != TOK_EOF) next();
+            if (tok == ')') next();
+            block(flags);
+        }
+
+    } else if (tcc_state->cplusplus && t == TOK_THROW) {
+        if (tok != ';') {
+            gexpr();
+            vpop();
+        }
+        vpush_helper_func(tok_alloc_const("abort"));
+        gfunc_call(0);
+        skip(';');
+
     } else {
-        if (tok == ':' && t >= TOK_UIDENT) {
+        if (tok == ':' && is_ident(t)) {
             /* label case */
 	    next();
             s = label_find(t);
@@ -7679,7 +8014,7 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
     if (flags & DIF_HAVE_ELEM)
         goto no_designator;
 
-    if (gnu_ext && tok >= TOK_UIDENT) {
+    if (gnu_ext && is_ident(tok)) {
         l = tok, next();
         if (tok == ':')
             goto struct_field;
@@ -8042,6 +8377,10 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
         if ((flags & DIF_SIZE_ONLY) && !p->sec)
             ++nocode_wanted;
 	parse_init_elem(!p->sec ? EXPR_ANY : EXPR_CONST);
+        if (tcc_state->cplusplus && (type->t & VT_REF)) {
+            mk_pointer(&vtop->type);
+            gaddrof();
+        }
         nocode_wanted = ncw_prev;
         flags |= DIF_HAVE_ELEM;
     }
@@ -8755,6 +9094,60 @@ static int decl(int l)
     while (1) {
 
         oldint = 0;
+        if (tcc_state->cplusplus) {
+            if (tok == TOK_EXTERN) {
+                next();
+                if (tok == TOK_STR) {
+                    next();
+                    if (tok == '{') {
+                        next();
+                        while (tok != '}' && tok != TOK_EOF) {
+                            decl(l);
+                        }
+                        if (tok == '}')
+                            next();
+                        continue;
+                    }
+                    /* e.g. extern "C" int foo(); */
+                    unget_tok(TOK_EXTERN);
+                } else {
+                    unget_tok(TOK_EXTERN);
+                }
+            }
+            if (tok == TOK_NAMESPACE) {
+                next();
+                if (is_ident(tok)) next();
+                if (tok == '{') {
+                    next();
+                    while (tok != '}' && tok != TOK_EOF) {
+                        decl(l);
+                    }
+                    if (tok == '}')
+                        next();
+                }
+                continue;
+            }
+            if (tok == TOK_USING) {
+                while (tok != ';' && tok != TOK_EOF) next();
+                if (tok == ';') next();
+                continue;
+            }
+            if (tok == TOK_TEMPLATE) {
+                next();
+                if (tok == TOK_LT) {
+                    int depth = 1;
+                    next();
+                    while (depth > 0 && tok != TOK_EOF) {
+                        if (tok == TOK_LT) depth++;
+                        else if (tok == TOK_GT) depth--;
+                        next();
+                    }
+                }
+                continue;
+            }
+        }
+        if (tok == '}' || tok == TOK_EOF)
+            break;
         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
             if (l == VT_JMP)
                 return 0;
@@ -8774,7 +9167,7 @@ static int decl(int l)
                 asm_global_instr();
                 continue;
             }
-            if (tok >= TOK_UIDENT) {
+            if (is_ident(tok)) {
                /* special test for old K&R protos without explicit int
                   type. Only accepted when defining global data */
                 btype.t = VT_INT;

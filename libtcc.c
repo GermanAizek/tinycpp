@@ -1206,6 +1206,16 @@ static int guess_filetype(const char *filename)
                      || !PATHCMP(ext, "h")
                      || !PATHCMP(ext, "i"))
                 filetype = AFF_TYPE_C;
+            else if (!PATHCMP(ext, "cpp")
+                     || !PATHCMP(ext, "cc")
+                     || !PATHCMP(ext, "cxx")
+                     || !PATHCMP(ext, "c++")
+                     || !PATHCMP(ext, "cp")
+                     || !PATHCMP(ext, "hpp")
+                     || !PATHCMP(ext, "hxx")
+                     || !PATHCMP(ext, "hh")
+                     || !strcmp(ext, "C"))
+                filetype = AFF_TYPE_CPP;
             else
                 filetype |= AFF_TYPE_BIN;
         } else {
@@ -1994,6 +2004,21 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
         case TCC_OPTION_std:
             if (strcmp(optarg, "=c11") == 0 || strcmp(optarg, "=gnu11") == 0)
                 s->cversion = 201112;
+            else if (strncmp(optarg, "=c++", 4) == 0 || strncmp(optarg, "=gnu++", 6) == 0) {
+                s->cplusplus = 1;
+                if (strstr(optarg, "11") || strstr(optarg, "0x"))
+                    s->cplusplus_version = 201103L;
+                else if (strstr(optarg, "14") || strstr(optarg, "1y"))
+                    s->cplusplus_version = 201402L;
+                else if (strstr(optarg, "17") || strstr(optarg, "1z"))
+                    s->cplusplus_version = 201703L;
+                else if (strstr(optarg, "20") || strstr(optarg, "2a"))
+                    s->cplusplus_version = 202002L;
+                else if (strstr(optarg, "23") || strstr(optarg, "2b"))
+                    s->cplusplus_version = 202302L;
+                else
+                    s->cplusplus_version = 199711L;
+            }
             break;
         case TCC_OPTION_shared:
             x = TCC_OUTPUT_DLL;
@@ -2128,7 +2153,9 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
 
         case TCC_OPTION_x:
             x = 0;
-            if (*optarg == 'c')
+            if (!strcmp(optarg, "c++") || !strcmp(optarg, "cpp") || !strcmp(optarg, "cxx"))
+                x = AFF_TYPE_CPP;
+            else if (*optarg == 'c')
                 x = AFF_TYPE_C;
             else if (*optarg == 'a')
                 x = AFF_TYPE_ASMPP;
@@ -2139,6 +2166,8 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             else
                 tcc_warning("unsupported language '%s'", optarg);
             s->filetype = x | (s->filetype & ~AFF_TYPE_MASK);
+            if (x == AFF_TYPE_CPP)
+                s->cplusplus = 1;
             break;
         case TCC_OPTION_O:
             s->optimize = isnum(optarg[0]) ? optarg[0]-'0' : 1 /* -O -Os */;

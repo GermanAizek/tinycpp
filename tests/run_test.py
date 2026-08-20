@@ -293,9 +293,47 @@ def run_cross_test(src_dir, build_dir):
         print(f"  . {cc} OK")
     return 0
 
+def run_tests_cpp(tcc, src_dir, build_dir, single_test=None):
+    tests_cpp_dir = os.path.join(src_dir, "tests", "tests_cpp")
+    cpp_files = sorted(glob.glob(os.path.join(tests_cpp_dir, "[0-9][0-9]_*.cpp")))
+    if single_test:
+        cpp_files = [f for f in cpp_files if os.path.basename(f).startswith(single_test)]
+    
+    tcc_flags = ["-B" + build_dir, "-I" + os.path.join(src_dir, "include"), "-I" + src_dir, "-I" + build_dir]
+    failed = []
+    
+    for cpp_file in cpp_files:
+        base = os.path.basename(cpp_file)
+        test_name = os.path.splitext(base)[0]
+        expect_file = os.path.splitext(cpp_file)[0] + ".expect"
+        if not os.path.exists(expect_file):
+            continue
+        with open(expect_file, "r", errors="ignore") as ef:
+            expect_text = ef.read()
+
+        cmd = [tcc] + tcc_flags + ["-run", cpp_file]
+        rc, out = run_cmd(cmd)
+        if rc != 0:
+            print(f"Test {test_name} FAILED (rc={rc}):\n{out}")
+            failed.append(test_name)
+            continue
+        if out != expect_text:
+            print(f"Test {test_name} FAILED: output mismatch")
+            print("EXPECTED:\n" + expect_text)
+            print("GOT:\n" + out)
+            failed.append(test_name)
+            continue
+        print(f"  . {test_name} OK")
+    
+    if failed:
+        print(f"\n{len(failed)} C++ test(s) failed: {', '.join(failed)}")
+        return 1
+    print(f"\nAll {len(cpp_files)} C++ tests passed successfully!")
+    return 0
+
 def main():
     parser = argparse.ArgumentParser(description="Test runner for TinyCC")
-    parser.add_argument("--test-type", required=True, choices=["tests2", "pp", "btest", "tcctest", "cross_test", "hello_exe", "hello_run", "vla_test", "asm_c_connect"])
+    parser.add_argument("--test-type", required=True, choices=["tests2", "pp", "btest", "tcctest", "cross_test", "hello_exe", "hello_run", "vla_test", "asm_c_connect", "cpp"])
     parser.add_argument("--tcc", default="tcc")
     parser.add_argument("--host-cc", default="gcc")
     parser.add_argument("--src-dir", required=True)
@@ -305,7 +343,9 @@ def main():
 
     tcc_flags = ["-B" + args.build_dir, "-I" + os.path.join(args.src_dir, "include"), "-I" + args.src_dir, "-I" + args.build_dir]
 
-    if args.test_type == "tests2":
+    if args.test_type == "cpp":
+        return run_tests_cpp(args.tcc, args.src_dir, args.build_dir, args.single_test)
+    elif args.test_type == "tests2":
         return run_tests2(args.tcc, args.host_cc, args.src_dir, args.build_dir, args.single_test)
     elif args.test_type == "pp":
         return run_tests_pp(args.tcc, args.src_dir, args.build_dir)
@@ -361,6 +401,12 @@ def main():
             return 1
         print("asm_c_connect OK")
         return 0
+    elif args.test_type == "benchmarks":
+        import run_benchmarks
+        bench_py = os.path.join(args.src_dir, "tests", "run_benchmarks.py")
+        rc, out = run_cmd([sys.executable, bench_py, "--build-dir", args.build_dir, "--src-dir", args.src_dir, "--tcc", args.tcc, "--quick"])
+        print(out)
+        return rc
 
 if __name__ == "__main__":
     sys.exit(main())

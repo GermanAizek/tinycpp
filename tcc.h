@@ -558,6 +558,7 @@ typedef struct Sym {
         struct Sym *cleanup_sym; /* symbol from __attribute__((cleanup())) */
         struct Sym *cleanup_label; /* label in 'pending_gotos' chain */
     };
+    struct Sym *base_class; /* C++ base class */
 } Sym;
 
 /* section definition */
@@ -742,11 +743,13 @@ struct TCCState {
     unsigned char rdynamic; /* if true, all symbols are exported */
     unsigned char symbolic; /* if true, resolve symbols in the current module first */
     unsigned char znodelete; /* Set DF_1_NODELETE in dynamic section */
-    unsigned char filetype; /* file type for compilation (NONE,C,ASM) */
+    unsigned int  filetype; /* file type for compilation (NONE,C,ASM,CPP) */
     unsigned char optimize; /* only to #define __OPTIMIZE__ */
     unsigned char option_pthread; /* -pthread option */
     unsigned char enable_new_dtags; /* -Wl,--enable-new-dtags */
     unsigned int  cversion; /* supported C ISO version, 199901 (the default), 201112, ... */
+    unsigned char cplusplus; /* C++ language mode */
+    long          cplusplus_version; /* __cplusplus macro value */
 
     /* C language options */
     unsigned char char_is_unsigned;
@@ -1072,7 +1075,8 @@ struct filespec {
 #define VT_TYPEDEF 0x00004000  /* typedef definition */
 #define VT_INLINE  0x00008000  /* inline definition */
 #define VT_TLS     0x00010000  /* thread-local storage */
-/* currently unused: 0x000[248]0000  */
+#define VT_REF     0x00020000  /* C++ reference type */
+/* currently unused: 0x000[48]0000  */
 
 #define VT_STRUCT_SHIFT 20     /* shift for bitfield shift values (32 - 2*6) */
 #define VT_STRUCT_MASK (((1U << (6+6)) - 1) << VT_STRUCT_SHIFT | VT_BITFIELD)
@@ -1150,6 +1154,7 @@ struct filespec {
 #define TOK_TWODOTS 0xa2 /* C++ token ? */
 #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
 #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
+#define TOK_TWOCOLONS 0xa5 /* :: */
 #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
 #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
 
@@ -1285,7 +1290,8 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_TYPE_ASM    2
 #define AFF_TYPE_ASMPP  4
 #define AFF_TYPE_LIB    8
-#define AFF_TYPE_MASK   (7 | AFF_TYPE_BIN)
+#define AFF_TYPE_CPP    0x100
+#define AFF_TYPE_MASK   (7 | AFF_TYPE_CPP | AFF_TYPE_BIN)
 /* values from tcc_object_type(...) */
 #define AFF_BINTYPE_REL 1
 #define AFF_BINTYPE_DYN 2

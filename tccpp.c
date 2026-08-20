@@ -93,6 +93,7 @@ static const unsigned char tok_two_chars[] =
     '|','=', TOK_A_OR,
     '-','>', TOK_ARROW,
     '.','.', TOK_TWODOTS,
+    ':',':', TOK_TWOCOLONS,
     '#','#', TOK_TWOSHARPS,
     0
 };
@@ -2921,12 +2922,20 @@ maybe_newline:
     case '}':
     case ',':
     case ';':
-    case ':':
     case '?':
     case '~':
     parse_simple:
         tok = c;
         p++;
+        break;
+    case ':':
+        PEEKC(c, p);
+        if (tcc_state->cplusplus && !(parse_flags & PARSE_FLAG_ASM_FILE) && c == ':') {
+            p++;
+            tok = TOK_TWOCOLONS;
+        } else {
+            tok = ':';
+        }
         break;
     case 0xEF: /* UTF8 BOM ? */
         if (p[1] == 0xBB && p[2] == 0xBF && p == file->buffer) {
@@ -3617,6 +3626,10 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
     cstr_printf(cs, "#define __SIZEOF_POINTER__ %d\n", PTR_SIZE);
     cstr_printf(cs, "#define __SIZEOF_LONG__ %d\n", LONG_SIZE);
     if (!is_asm) {
+      if (s1->cplusplus) {
+        cstr_printf(cs, "#define __cplusplus %ldL\n", s1->cplusplus_version ? s1->cplusplus_version : 201103L);
+        putdef(cs, "__GNUG__ 4");
+      }
       putdef(cs, "__STDC__");
       cstr_printf(cs, "#define __STDC_HOSTED__ %d\n", s1->nostdlib ? 0 : 1);
       cstr_printf(cs, "#define __STDC_VERSION__ %dL\n", s1->cversion);
@@ -3635,6 +3648,9 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
 ST_FUNC void preprocess_start(TCCState *s1, int filetype)
 {
     int is_asm = !!(filetype & (AFF_TYPE_ASM|AFF_TYPE_ASMPP));
+
+    if (filetype & AFF_TYPE_CPP)
+        s1->cplusplus = 1;
 
     tccpp_new(s1);
 

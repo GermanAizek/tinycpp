@@ -1,0 +1,7 @@
+Active status: 1
+Pointer is nullptr
+Rectangle: 10x20, area=200, color=0xff00aa
+Rectangle: 20x40, area=800, color=0xff00aa
+Rectangle: 60x120, area=7200, color=0xff00aa
+Cast result: 42
+Native sum: 350

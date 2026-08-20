@@ -100,6 +100,29 @@ add_test(
         --build-dir ${CMAKE_BINARY_DIR}
 )
 
+add_test(
+    NAME test_cpp
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_test.py
+        --test-type cpp
+        --tcc $<TARGET_FILE:tcc>
+        --src-dir ${CMAKE_SOURCE_DIR}
+        --build-dir ${CMAKE_BINARY_DIR}
+)
+
+file(GLOB CPP_TEST_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests_cpp/[0-9][0-9]_*.cpp")
+foreach(test_file ${CPP_TEST_FILES})
+    get_filename_component(test_name ${test_file} NAME_WLE)
+    add_test(
+        NAME "test_cpp_${test_name}"
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_test.py
+            --test-type cpp
+            --single-test ${test_name}
+            --tcc $<TARGET_FILE:tcc>
+            --src-dir ${CMAKE_SOURCE_DIR}
+            --build-dir ${CMAKE_BINARY_DIR}
+    )
+endforeach()
+
 if(TCC_BUILD_CROSS_COMPILERS)
     add_test(
         NAME test_cross_compilers
@@ -109,3 +132,22 @@ if(TCC_BUILD_CROSS_COMPILERS)
             --build-dir ${CMAKE_BINARY_DIR}
     )
 endif()
+
+add_custom_target(
+    benchmarks
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_benchmarks.py
+        --build-dir ${CMAKE_BINARY_DIR}
+        --src-dir ${CMAKE_SOURCE_DIR}
+        --tcc $<TARGET_FILE:tcc>
+    DEPENDS tcc
+    COMMENT "Running Performance & RAM benchmarks and generating HTML report..."
+)
+
+add_test(
+    NAME test_benchmarks
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_benchmarks.py
+        --quick
+        --build-dir ${CMAKE_BINARY_DIR}
+        --src-dir ${CMAKE_SOURCE_DIR}
+        --tcc $<TARGET_FILE:tcc>
+)

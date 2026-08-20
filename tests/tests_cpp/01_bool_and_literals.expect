@@ -1,0 +1,5 @@
+__cplusplus is defined
+b1 is true
+b2 is false
+nullptr is null
+sizeof(bool) = 1

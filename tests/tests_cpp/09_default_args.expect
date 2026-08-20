@@ -1,0 +1,6 @@
+multiply(3): 60
+multiply(3, 4): 24
+multiply(3, 4, 5): 60
+coords: 1 5 10
+coords: 1 2 10
+coords: 1 2 3
