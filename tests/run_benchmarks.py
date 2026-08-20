@@ -123,9 +123,9 @@ def discover_emulators():
             emulators[arch] = p
     return emulators
 
-def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_flag, arch, build_dir, emulators, timeout_sec=60):
+def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_flag, arch, build_dir, emulators, compile_runs=3, exec_runs=5, timeout_sec=60):
     """
-    Compile and run a single benchmark configuration.
+    Compile and run a single benchmark configuration over multiple iterations for statistical stability.
     """
     bench_basename = os.path.splitext(os.path.basename(bench_file))[0]
     tid = threading.get_ident()
@@ -158,12 +158,28 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
             compile_cmd += ["--target=riscv64-linux-gnu"]
         compile_cmd += ["-o", out_exe, bench_file, "-lm"]
 
-    # Measure compilation
-    c_rc, c_time_ms, c_rss_kb, c_stdout, c_stderr = run_command_measured(compile_cmd, build_dir, timeout_sec=timeout_sec)
+    # Measure compilation over multiple runs
+    c_times = []
+    c_rss_list = []
+    c_rc = 0
+    c_stdout, c_stderr = "", ""
+
+    for _ in range(max(1, compile_runs)):
+        rc, t_ms, rss_kb, out, err = run_command_measured(compile_cmd, build_dir, timeout_sec=timeout_sec)
+        c_rc = rc
+        c_stdout = out
+        c_stderr = err
+        if rc != 0:
+            break
+        c_times.append(t_ms)
+        c_rss_list.append(rss_kb)
     
     bin_size = get_binary_size(out_exe) if c_rc == 0 else 0
     
-    if c_rc != 0:
+    if c_rc != 0 or len(c_times) == 0:
+        if os.path.exists(out_exe):
+            try: os.remove(out_exe)
+            except Exception: pass
         return {
             "benchmark": bench_basename,
             "lang": lang,
@@ -171,14 +187,19 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
             "opt": opt_flag,
             "arch": arch,
             "compile_success": False,
-            "compile_time_ms": c_time_ms,
-            "compiler_peak_rss_kb": c_rss_kb,
+            "compile_time_ms": c_times[0] if c_times else 0,
+            "compiler_peak_rss_kb": max(c_rss_list) if c_rss_list else 0,
             "exec_success": False,
             "exec_time_ms": 0,
             "exec_peak_rss_kb": 0,
             "binary_size_bytes": 0,
+            "compile_runs": len(c_times),
+            "exec_runs": 0,
             "error": f"Compile failed (rc={c_rc}): {c_stderr}"
         }
+
+    c_time_ms = sum(c_times) / len(c_times)
+    c_rss_kb = max(c_rss_list)
 
     # Execution command
     exec_cmd = []
@@ -188,6 +209,9 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
         exec_cmd = [emulators[arch], out_exe]
     else:
         # Cannot run cross-binary without emulator
+        if os.path.exists(out_exe):
+            try: os.remove(out_exe)
+            except Exception: pass
         return {
             "benchmark": bench_basename,
             "lang": lang,
@@ -201,11 +225,26 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
             "exec_time_ms": 0, # Not executed (cross target without emulator)
             "exec_peak_rss_kb": 0,
             "binary_size_bytes": bin_size,
+            "compile_runs": len(c_times),
+            "exec_runs": 0,
             "note": f"Compiled for {arch} (no emulator)"
         }
 
-    # Run execution (average of 2 runs for stability)
-    e_rc, e_time_ms, e_rss_kb, e_stdout, e_stderr = run_command_measured(exec_cmd, build_dir, timeout_sec=timeout_sec)
+    # Run execution over multiple iterations for statistical stability
+    e_times = []
+    e_rss_list = []
+    e_rc = 0
+    e_stdout, e_stderr = "", ""
+
+    for _ in range(max(1, exec_runs)):
+        rc, t_ms, rss_kb, out, err = run_command_measured(exec_cmd, build_dir, timeout_sec=timeout_sec)
+        e_rc = rc
+        e_stdout = out
+        e_stderr = err
+        if rc != 0:
+            break
+        e_times.append(t_ms)
+        e_rss_list.append(rss_kb)
     
     # Cleanup executable
     if os.path.exists(out_exe):
@@ -214,6 +253,29 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
         except Exception:
             pass
 
+    if e_rc != 0 or len(e_times) == 0:
+        return {
+            "benchmark": bench_basename,
+            "lang": lang,
+            "compiler": compiler_name,
+            "opt": opt_flag,
+            "arch": arch,
+            "compile_success": True,
+            "compile_time_ms": c_time_ms,
+            "compiler_peak_rss_kb": c_rss_kb,
+            "exec_success": False,
+            "exec_time_ms": 0,
+            "exec_peak_rss_kb": 0,
+            "binary_size_bytes": bin_size,
+            "compile_runs": len(c_times),
+            "exec_runs": len(e_times),
+            "error": f"Execution failed (rc={e_rc}): {e_stderr}"
+        }
+
+    e_time_ms = sum(e_times) / len(e_times)
+    e_rss_kb = max(e_rss_list)
+    min_e_time_ms = min(e_times)
+
     return {
         "benchmark": bench_basename,
         "lang": lang,
@@ -221,12 +283,15 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
         "opt": opt_flag,
         "arch": arch,
         "compile_success": (c_rc == 0),
-        "compile_time_ms": c_time_ms,
+        "compile_time_ms": round(c_time_ms, 2),
         "compiler_peak_rss_kb": c_rss_kb,
         "exec_success": (e_rc == 0),
-        "exec_time_ms": e_time_ms,
+        "exec_time_ms": round(e_time_ms, 2),
+        "exec_min_time_ms": round(min_e_time_ms, 2),
         "exec_peak_rss_kb": e_rss_kb,
         "binary_size_bytes": bin_size,
+        "compile_runs": len(c_times),
+        "exec_runs": len(e_times),
         "output_sample": e_stdout.strip().splitlines()[-1] if e_stdout.strip() else ""
     }
 
@@ -843,9 +908,11 @@ def main():
     parser.add_argument("--html-out", default=None, help="Output HTML file path")
     parser.add_argument("--json-out", default=None, help="Output JSON file path")
     parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, help="Number of parallel worker threads (default: CPU cores)")
+    parser.add_argument("-r", "--runs", "--exec-runs", dest="exec_runs", type=int, default=5, help="Number of runtime execution runs to average (default: 5)")
+    parser.add_argument("--compile-runs", type=int, default=3, help="Number of compilation runs to average (default: 3)")
     parser.add_argument("--opt-levels", default="-O0,-O1,-O2,-O3,-Os", help="Comma-separated optimization levels")
     parser.add_argument("--archs", default="x86_64", help="Comma-separated target architectures (e.g. x86_64,i386,arm,arm64,riscv64)")
-    parser.add_argument("--quick", action="store_true", help="Quick mode (only -O0 and -O2 on native arch)")
+    parser.add_argument("--quick", action="store_true", help="Quick mode (only -O0 and -O2 on native arch with fewer iterations)")
     args = parser.parse_args()
 
     build_dir = os.path.abspath(args.build_dir)
@@ -858,6 +925,8 @@ def main():
     opt_levels = ["-O0", "-O2"] if args.quick else args.opt_levels.split(",")
     archs = ["x86_64"] if args.quick else args.archs.split(",")
     jobs = max(1, args.jobs)
+    exec_runs = 2 if args.quick else max(1, args.exec_runs)
+    compile_runs = 1 if args.quick else max(1, args.compile_runs)
 
     compilers = discover_compilers(build_dir, args.tcc)
     emulators = discover_emulators()
@@ -869,6 +938,7 @@ def main():
     print(f"   Optimization Levels: {opt_levels}")
     print(f"   Target Architectures: {archs}")
     print(f"   Parallel Workers: {jobs}")
+    print(f"   Averaging Iterations: {exec_runs} execution runs, {compile_runs} compile runs")
     print("=" * 60)
 
     c_benchmarks = sorted(glob.glob(os.path.join(bench_dir, "c", "*.c")))
@@ -890,7 +960,7 @@ def main():
                     comp_list.append((f"tcc-{arch}", compilers[f"tcc-{arch}"]))
 
                 for comp_name, comp_bin in comp_list:
-                    tasks.append((bench, "c", comp_name, comp_bin, opt, arch, build_dir, emulators))
+                    tasks.append((bench, "c", comp_name, comp_bin, opt, arch, build_dir, emulators, compile_runs, exec_runs))
 
     # 2. C++ benchmarks
     for bench in cpp_benchmarks:
@@ -905,9 +975,9 @@ def main():
                     comp_list.append((f"t++-{arch}", compilers[f"tcc-{arch}"]))
 
                 for comp_name, comp_bin in comp_list:
-                    tasks.append((bench, "cpp", comp_name, comp_bin, opt, arch, build_dir, emulators))
+                    tasks.append((bench, "cpp", comp_name, comp_bin, opt, arch, build_dir, emulators, compile_runs, exec_runs))
 
-    print(f"\n[*] Executing {len(tasks)} benchmark runs across {jobs} parallel worker threads...\n")
+    print(f"\n[*] Executing {len(tasks)} benchmark configurations across {jobs} worker threads (each averaged over {exec_runs} runs)...\n")
     start_time = time.perf_counter()
 
     lock = threading.Lock()
@@ -916,12 +986,12 @@ def main():
 
     def worker(task):
         nonlocal completed_count
-        bench, lang, comp_name, comp_bin, opt, arch, bdir, emus = task
-        res = build_and_run_benchmark(bench, lang, comp_name, comp_bin, opt, arch, bdir, emus)
+        bench, lang, comp_name, comp_bin, opt, arch, bdir, emus, c_runs, e_runs = task
+        res = build_and_run_benchmark(bench, lang, comp_name, comp_bin, opt, arch, bdir, emus, compile_runs=c_runs, exec_runs=e_runs)
         with lock:
             completed_count += 1
             status = "OK" if res["compile_success"] else "FAIL"
-            print(f"  [{completed_count:>3}/{total_count}] [{status}] {res['benchmark']:<18} | {comp_name:<8} {opt:<4} ({arch}): Compile {res['compile_time_ms']:>5.1f}ms (RAM {res['compiler_peak_rss_kb']:>5}KB) | Run {res['exec_time_ms']:>5.1f}ms (RAM {res['exec_peak_rss_kb']:>5}KB) | Bin {res['binary_size_bytes']:>5}B")
+            print(f"  [{completed_count:>3}/{total_count}] [{status}] {res['benchmark']:<18} | {comp_name:<8} {opt:<4} ({arch}): Compile {res['compile_time_ms']:>5.1f}ms (RAM {res['compiler_peak_rss_kb']:>5}KB) | Run {res['exec_time_ms']:>5.1f}ms (RAM {res['exec_peak_rss_kb']:>5}KB) | Bin {res['binary_size_bytes']:>5}B [avg of {e_runs} runs]")
         return res
 
     results = []
