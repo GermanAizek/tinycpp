@@ -1772,10 +1772,29 @@ void gen_opi(int op)
                 orex(ll, r, r, 0x8d); /* lea (r, r, 4), r */
                 o(0x04 | (REG_VALUE(r) << 3));
                 o(0x80 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+            } else if (c == 6) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 2), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0x40 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+                orex(ll, r, r, 0x01); /* add r, r */
+                o(0xc0 + REG_VALUE(r) * 9);
             } else if (c == 9) {
                 orex(ll, r, r, 0x8d); /* lea (r, r, 8), r */
                 o(0x04 | (REG_VALUE(r) << 3));
                 o(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+            } else if (c == 10) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 4), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0x80 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+                orex(ll, r, r, 0x01); /* add r, r */
+                o(0xc0 + REG_VALUE(r) * 9);
+            } else if (c == 12) {
+                orex(ll, r, r, 0x8d); /* lea (r, r, 2), r */
+                o(0x04 | (REG_VALUE(r) << 3));
+                o(0x40 | (REG_VALUE(r) << 3) | REG_VALUE(r));
+                orex(ll, r, 0, 0xc1); /* shl $2, r */
+                o(0xe0 | REG_VALUE(r));
+                g(2);
             } else if (c == 4 || c == 8 || c == 16 || c == 32 || c == 64 ||
                        c == 128 || c == 256 || c == 512 || c == 1024 ||
                        c == 2048 || c == 4096) {
@@ -1850,6 +1869,54 @@ void gen_opi(int op)
     case TOK_PDIV:
         uu = 0;
     divmod:
+        if (!ll && !uu && cc) {
+            int c = vtop->c.i;
+            int m = 0, shift = 0;
+            if (c == 10) {
+                m = 0x66666667; shift = 34;
+            } else if (c == 100) {
+                m = 0x51eb851f; shift = 37;
+            } else if (c == 1000) {
+                m = 0x10624dd3; shift = 38;
+            }
+            if (m != 0) {
+                vswap();
+                gv(RC_RAX);
+                vswap();
+                vtop--;
+                save_reg(TREG_RDX);
+                save_reg(TREG_RCX);
+                /* movslq %eax, %rax */
+                o(0xc06348);
+                /* imul $m, %rax, %rdx */
+                orex(1, TREG_RDX, TREG_RAX, 0x69);
+                oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RAX), m);
+                /* sar $shift, %rdx */
+                orex(1, TREG_RDX, 0, 0xc1);
+                o(0xf8 | REG_VALUE(TREG_RDX));
+                g(shift);
+                /* mov %eax, %ecx; shr $31, %ecx; add %ecx, %edx */
+                o(0xc189);
+                o(0xe9c1); g(31);
+                o(0xca01);
+                if (op == '%' || op == TOK_UMOD) {
+                    /* edx = edx * c; eax = eax - edx */
+                    if (c == (signed char)c) {
+                        orex(0, TREG_RDX, TREG_RDX, 0x6b);
+                        o(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX));
+                        g(c);
+                    } else {
+                        orex(0, TREG_RDX, TREG_RDX, 0x69);
+                        oad(0xc0 | (REG_VALUE(TREG_RDX) << 3) | REG_VALUE(TREG_RDX), c);
+                    }
+                    o(0xd029); /* sub %edx, %eax */
+                    vtop->r = TREG_RAX;
+                } else {
+                    vtop->r = TREG_RDX;
+                }
+                break;
+            }
+        }
         /* first operand must be in eax */
         /* XXX: need better constraint for second operand */
         gv2(RC_RAX, RC_RCX);
