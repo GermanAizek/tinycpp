@@ -2416,6 +2416,13 @@ ST_FUNC void gen_struct_copy(int size)
         o(0x110f); g(0x07); /* movups %xmm0, (%rdi) */
         o(0x100f); g(0x46); g(0x10); /* movups 0x10(%rsi), %xmm0 */
         o(0x110f); g(0x47); g(0x10); /* movups %xmm0, 0x10(%rdi) */
+    } else if (size == 64) {
+        /* 512-bit (2x 256-bit AVX) move */
+        g(0xc5); g(0xfc); g(0x10); g(0x06);       /* vmovups (%rsi), %ymm0 */
+        g(0xc5); g(0xfc); g(0x11); g(0x07);       /* vmovups %ymm0, (%rdi) */
+        g(0xc5); g(0xfc); g(0x10); g(0x46); g(0x20); /* vmovups 0x20(%rsi), %ymm0 */
+        g(0xc5); g(0xfc); g(0x11); g(0x47); g(0x20); /* vmovups %ymm0, 0x20(%rdi) */
+        g(0xc5); g(0xf8); g(0x77);               /* vzeroupper */
     } else if (n <= 4) {
         while (n)
             o(0xa548), --n;
@@ -2425,7 +2432,7 @@ ST_FUNC void gen_struct_copy(int size)
         o(0xa548f3);
         vpop();
     }
-    if (size != 16 && size != 32) {
+    if (size != 16 && size != 32 && size != 64) {
         if (size & 0x04)
             o(0xa5);
         if (size & 0x02)
