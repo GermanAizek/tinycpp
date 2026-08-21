@@ -147,11 +147,14 @@ ST_DATA const int reg_classes[NB_REGS] = {
     /* xmm3 */ RC_FLOAT | RC_XMM3,
     /* xmm4 */ RC_FLOAT | RC_XMM4,
     /* xmm5 */ RC_FLOAT | RC_XMM5,
-    /* xmm6 an xmm7 are included so gv() can be used on them,
-       but they are not tagged with RC_FLOAT because they are
-       callee saved on Windows */
+    /* xmm6 and xmm7 are callee saved on Windows PE, but scratch on SysV Linux */
+#ifdef TCC_TARGET_PE
     RC_XMM6,
     RC_XMM7,
+#else
+    RC_FLOAT | RC_XMM6,
+    RC_FLOAT | RC_XMM7,
+#endif
     /* st0 */ RC_ST0
 };
 
