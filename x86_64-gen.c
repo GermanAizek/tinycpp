@@ -1875,6 +1875,42 @@ static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
     return 1;
 }
 
+static int reg_used_by_inst(const uint8_t *p, int len, int reg)
+{
+    int rex = 0;
+    int op, mod, r_reg, r_rm, i = 0;
+
+    if (len <= 0) return 0;
+    while (i < len) {
+        if (p[i] >= 0x40 && p[i] <= 0x4f) {
+            rex = p[i]; i++;
+        } else if (p[i] == 0x66 || p[i] == 0xf2 || p[i] == 0xf3 || p[i] == 0x67) {
+            i++;
+        } else break;
+    }
+    if (i >= len) return 0;
+    op = p[i++];
+    if (op == 0x90) return 0;
+    if (op == 0xe8) return 1; /* call may use reg */
+    if (i < len) {
+        uint8_t modrm = p[i];
+        mod = (modrm >> 6) & 3;
+        r_reg = ((modrm >> 3) & 7) | ((rex & 4) ? 8 : 0);
+        r_rm = (modrm & 7) | ((rex & 1) ? 8 : 0);
+        if (r_reg == reg) return 1;
+        if (mod == 3 && r_rm == reg) return 1;
+        if (mod != 3 && (r_rm & 7) == 4 && i + 1 < len) {
+            uint8_t sib = p[i + 1];
+            int s_base = (sib & 7) | ((rex & 1) ? 8 : 0);
+            int s_idx = ((sib >> 3) & 7) | ((rex & 2) ? 8 : 0);
+            if (s_base == reg || (s_idx != 4 && s_idx == reg)) return 1;
+        } else if (mod != 3 && (r_rm & 7) != 4 && (r_rm & 7) != 5) {
+            if (r_rm == reg) return 1;
+        }
+    }
+    return reg_modified_by_inst(p, len, reg);
+}
+
 static void x86_64_optimize_func(int func_start, int func_end)
 {
     uint8_t *code;
@@ -1928,8 +1964,12 @@ static void x86_64_optimize_func(int func_start, int func_end)
         ElfW_Rel *rel;
         for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
             int r_off = (int)rel->r_offset;
-            if (r_off >= func_start && r_off <= func_end) {
-                is_target[r_off - func_start] = 1;
+            int k;
+            for (k = -8; k <= 8; k++) {
+                int off = r_off + k;
+                if (off >= func_start && off < func_end) {
+                    is_target[off - func_start] = 1;
+                }
             }
         }
     }
@@ -1970,7 +2010,7 @@ static void x86_64_optimize_func(int func_start, int func_end)
                 }
             }
 
-            /* 2. 64-bit integer: mov %reg64, [rbp+disp] followed by mov [rbp+disp], %reg64 */
+            /* 2. 64-bit integer: mov %reg, [rbp+disp] followed by mov [rbp+disp], %reg */
             if (p1[0] == 0x48 && p1[1] == 0x89 && p2[0] == 0x48 && p2[1] == 0x8b && p1[2] == p2[2]) {
                 int mod = (p1[2] >> 6) & 3;
                 int rm = p1[2] & 7;
@@ -2053,12 +2093,356 @@ static void x86_64_optimize_func(int func_start, int func_end)
                 /* Case: movq %xmm, (%rax) -> store from XMM */
                 if (p2[0] == 0x66 && p2[1] == 0x0f && p2[2] == 0xd6 && (p2[3] & 0xc7) == 0x00 && len2 == 4) {
                     uint8_t xmm_reg = (p2[3] >> 3) & 7;
-                    p1[0] = 0x66; p1[0] = 0x0f; p1[2] = 0xd6; p1[3] = 0x04 | (xmm_reg << 3);
+                    p1[0] = 0x66; p1[1] = 0x0f; p1[2] = 0xd6; p1[3] = 0x04 | (xmm_reg << 3);
                     p1[4] = sib;
                     emit_nops(p1 + 5, 3);
                     changed = 1;
                     pc = next_pc + 4;
                     continue;
+                }
+            }
+
+            /* Pass K: Struct Field / Pointer Offset Add-Dereference Folding */
+            /* add $disp8, %rax (48 83 c0 <disp>) + mov (%rax), %reg -> mov disp8(%rax), %reg */
+            if (p1[0] == 0x48 && p1[1] == 0x83 && p1[2] == 0xc0 && len == 4) {
+                uint8_t disp = p1[3];
+                /* 1. Direct 32-bit load: mov (%rax), %reg32 (8b <modrm>, mod=0, rm=0, len2=2) */
+                if (p2[0] == 0x8b && (p2[1] & 0xc7) == 0x00 && len2 == 2) {
+                    uint8_t reg = (p2[1] >> 3) & 7;
+                    p1[0] = 0x8b; p1[1] = 0x40 | (reg << 3); p1[2] = disp;
+                    emit_nops(p1 + 3, len + len2 - 3);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+                /* 2. Direct 64-bit load: mov (%rax), %reg64 (48 8b <modrm>, mod=0, rm=0, len2=3) */
+                if (p2[0] == 0x48 && p2[1] == 0x8b && (p2[2] & 0xc7) == 0x00 && len2 == 3) {
+                    uint8_t reg = (p2[2] >> 3) & 7;
+                    p1[0] = 0x48; p1[1] = 0x8b; p1[2] = 0x40 | (reg << 3); p1[3] = disp;
+                    emit_nops(p1 + 4, len + len2 - 4);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+                /* 3. Direct 32-bit store: mov %reg32, (%rax) (89 <modrm>, mod=0, rm=0, len2=2) */
+                if (p2[0] == 0x89 && (p2[1] & 0xc7) == 0x00 && len2 == 2) {
+                    uint8_t reg = (p2[1] >> 3) & 7;
+                    p1[0] = 0x89; p1[1] = 0x40 | (reg << 3); p1[2] = disp;
+                    emit_nops(p1 + 3, len + len2 - 3);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+                /* 4. Direct 64-bit store: mov %reg64, (%rax) (48 89 <modrm>, mod=0, rm=0, len2=3) */
+                if (p2[0] == 0x48 && p2[1] == 0x89 && (p2[2] & 0xc7) == 0x00 && len2 == 3) {
+                    uint8_t reg = (p2[2] >> 3) & 7;
+                    p1[0] = 0x48; p1[1] = 0x89; p1[2] = 0x40 | (reg << 3); p1[3] = disp;
+                    emit_nops(p1 + 4, len + len2 - 4);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+                /* 5. Lookahead: add $disp, %rax + mov [rbp+d], %reg32 + mov %reg32, (%rax) */
+                if (next_pc + len2 + 2 <= func_end && !is_target[next_pc + len2 - func_start]) {
+                    uint8_t *p3 = code + next_pc + len2;
+                    int len3 = x86_inst_length(p3, func_end - (next_pc + len2));
+                    if (p2[0] == 0x8b && (((p2[1] >> 6) & 3) == 1 || ((p2[1] >> 6) & 3) == 2) && (p2[1] & 7) == 5 &&
+                        p3[0] == 0x89 && (p3[1] & 0xc7) == 0x00 && ((p3[1] >> 3) & 7) == ((p2[1] >> 3) & 7) && len3 == 2) {
+                        uint8_t reg = (p3[1] >> 3) & 7;
+                        /* Move load to p1, then emit mov %reg, disp8(%rax) */
+                        uint8_t tmp_load[8];
+                        memcpy(tmp_load, p2, len2);
+                        memcpy(p1, tmp_load, len2);
+                        p1[len2] = 0x89;
+                        p1[len2 + 1] = 0x40 | (reg << 3);
+                        p1[len2 + 2] = disp;
+                        emit_nops(p1 + len2 + 3, len + len2 + len3 - (len2 + 3));
+                        changed = 1;
+                        pc = next_pc + len2 + len3;
+                        continue;
+                    }
+                    /* 6. Lookahead 64-bit: add $disp, %rax + mov [rbp+d], %reg64 + mov %reg64, (%rax) */
+                    if (p2[0] == 0x48 && p2[1] == 0x8b && (((p2[2] >> 6) & 3) == 1 || ((p2[2] >> 6) & 3) == 2) && (p2[2] & 7) == 5 &&
+                        p3[0] == 0x48 && p3[1] == 0x89 && (p3[2] & 0xc7) == 0x00 && ((p3[2] >> 3) & 7) == ((p2[2] >> 3) & 7) && len3 == 3) {
+                        uint8_t reg = (p3[2] >> 3) & 7;
+                        uint8_t tmp_load[8];
+                        memcpy(tmp_load, p2, len2);
+                        memcpy(p1, tmp_load, len2);
+                        p1[len2] = 0x48;
+                        p1[len2 + 1] = 0x89;
+                        p1[len2 + 2] = 0x40 | (reg << 3);
+                        p1[len2 + 3] = disp;
+                        emit_nops(p1 + len2 + 4, len + len2 + len3 - (len2 + 4));
+                        changed = 1;
+                        pc = next_pc + len2 + len3;
+                        continue;
+                    }
+                }
+            }
+
+            /* Pass N: Linked-List Head Insertion (insert) Optimization */
+            /* add $8, %rax + mov [rbp+ht], %rcx + mov [rbp+idx], %edx + lea (%rcx,%rdx,8), %rcx +
+               mov (%rcx), %rcx + mov %rcx, (%rax) + mov [rbp+ht], %rax + mov [rbp+idx], %ecx +
+               lea (%rax,%rcx,8), %rax + mov [rbp+entry], %rcx + mov %rcx, (%rax)
+            */
+            if (p1[0] == 0x48 && p1[1] == 0x83 && p1[2] == 0xc0 && p1[3] == 0x08 && len == 4 && next_pc + 35 <= func_end) {
+                uint8_t *p_ht = code + next_pc;
+                if (p_ht[0] == 0x48 && p_ht[1] == 0x8b && p_ht[2] == 0x4d &&
+                    !is_target[next_pc - func_start]) {
+                    uint8_t disp_ht = p_ht[3];
+                    uint8_t *p_idx = p_ht + 4;
+                    if (p_idx[0] == 0x8b && p_idx[1] == 0x55) {
+                        uint8_t disp_idx = p_idx[2];
+                        uint8_t *p_lea1 = p_idx + 3;
+                        if (p_lea1[0] == 0x48 && p_lea1[1] == 0x8d && p_lea1[2] == 0x0c && p_lea1[3] == 0xd1) {
+                            uint8_t *p_ld = p_lea1 + 4;
+                            if (p_ld[0] == 0x48 && p_ld[1] == 0x8b && p_ld[2] == 0x09) {
+                                uint8_t *p_st1 = p_ld + 3;
+                                if (p_st1[0] == 0x48 && p_st1[1] == 0x89 && p_st1[2] == 0x08) {
+                                    uint8_t *p_ht2 = p_st1 + 3;
+                                    if (p_ht2[0] == 0x48 && p_ht2[1] == 0x8b && p_ht2[2] == 0x45 && p_ht2[3] == disp_ht) {
+                                        uint8_t *p_idx2 = p_ht2 + 4;
+                                        if (p_idx2[0] == 0x8b && p_idx2[1] == 0x4d && p_idx2[2] == disp_idx) {
+                                            uint8_t *p_lea2 = p_idx2 + 3;
+                                            if (p_lea2[0] == 0x48 && p_lea2[1] == 0x8d && p_lea2[2] == 0x04 && p_lea2[3] == 0xc8) {
+                                                uint8_t *p_en = p_lea2 + 4;
+                                                if (p_en[0] == 0x48 && p_en[1] == 0x8b && p_en[2] == 0x4d) {
+                                                    uint8_t *p_st2 = p_en + 4;
+                                                    if (p_st2[0] == 0x48 && p_st2[1] == 0x89 && p_st2[2] == 0x08) {
+                                                        /* 1. mov [rbp+ht], %rcx (48 8b 4d disp_ht) */
+                                                        p1[0] = 0x48; p1[1] = 0x8b; p1[2] = 0x4d; p1[3] = disp_ht;
+                                                        /* 2. mov [rbp+idx], %edx (8b 55 disp_idx) */
+                                                        p1[4] = 0x8b; p1[5] = 0x55; p1[6] = disp_idx;
+                                                        /* 3. lea (%rcx, %rdx, 8), %rdx (48 8d 14 d1) */
+                                                        p1[7] = 0x48; p1[8] = 0x8d; p1[9] = 0x14; p1[10] = 0xd1;
+                                                        /* 4. mov (%rdx), %rcx (48 8b 0a) */
+                                                        p1[11] = 0x48; p1[12] = 0x8b; p1[13] = 0x0a;
+                                                        /* 5. mov %rcx, 8(%rax) (48 89 48 08) */
+                                                        p1[14] = 0x48; p1[15] = 0x89; p1[16] = 0x48; p1[17] = 0x08;
+                                                        /* 6. mov %rax, (%rdx) (48 89 02) */
+                                                        p1[18] = 0x48; p1[19] = 0x89; p1[20] = 0x02;
+                                                        /* 7. NOP out the remaining 18 bytes */
+                                                        emit_nops(p1 + 21, 18);
+                                                        changed = 1;
+                                                        pc = next_pc + 35;
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Pass L: XOR-Shift Hash Expression Register Forwarding */
+            if (p1[0] == 0x89 && p1[1] == 0x45 && len == 3) {
+                uint8_t disp = p1[2];
+                int s_pc = next_pc;
+                while (s_pc < func_end && !is_target[s_pc - func_start]) {
+                    int c_len = x86_inst_length(code + s_pc, func_end - s_pc);
+                    if (c_len <= 0) break;
+                    if (code[s_pc] == 0x90 || (code[s_pc] == 0x0f && code[s_pc + 1] == 0x1f) || (code[s_pc] == 0x66 && code[s_pc + 1] == 0x90)) {
+                        s_pc += c_len;
+                    } else break;
+                }
+                if (s_pc + 8 <= func_end && !is_target[s_pc - func_start]) {
+                    uint8_t *p_shr = code + s_pc;
+                    if (p_shr[0] == 0xc1 && p_shr[1] == 0xe8 && p_shr[2] == 0x10) {
+                        int l_pc = s_pc + 3;
+                        while (l_pc < func_end && !is_target[l_pc - func_start]) {
+                            int c_len = x86_inst_length(code + l_pc, func_end - l_pc);
+                            if (c_len <= 0) break;
+                            if (code[l_pc] == 0x90 || (code[l_pc] == 0x0f && code[l_pc + 1] == 0x1f) || (code[l_pc] == 0x66 && code[l_pc + 1] == 0x90)) {
+                                l_pc += c_len;
+                            } else break;
+                        }
+                        if (l_pc + 5 <= func_end && !is_target[l_pc - func_start]) {
+                            uint8_t *p_load = code + l_pc;
+                            if (p_load[0] == 0x8b && p_load[1] == 0x4d && p_load[2] == disp) {
+                                int x_pc = l_pc + 3;
+                                while (x_pc < func_end && !is_target[x_pc - func_start]) {
+                                    int c_len = x86_inst_length(code + x_pc, func_end - x_pc);
+                                    if (c_len <= 0) break;
+                                    if (code[x_pc] == 0x90 || (code[x_pc] == 0x0f && code[x_pc + 1] == 0x1f) || (code[x_pc] == 0x66 && code[x_pc + 1] == 0x90)) {
+                                        x_pc += c_len;
+                                    } else break;
+                                }
+                                if (x_pc + 2 <= func_end && !is_target[x_pc - func_start]) {
+                                    uint8_t *p_xor = code + x_pc;
+                                    if (p_xor[0] == 0x31 && p_xor[1] == 0xc8) {
+                                        p1[0] = 0x89; p1[1] = 0xc1; p1[2] = 0x90; /* mov %eax, %ecx; nop */
+                                        emit_nops(p_load, 3); /* NOP out load */
+                                        changed = 1;
+                                        pc = next_pc;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Pass O: Struct Member Compare Redirection to Preserve RAX */
+            /* mov (%rax), %eax (8b 00) + mov [rbp+disp], %ecx (8b 4d) + cmp %ecx, %eax (39 c8)
+               -> mov (%rax), %edx (8b 10) + mov [rbp+disp], %ecx (8b 4d) + cmp %ecx, %edx (39 ca)
+            */
+            if (p1[0] == 0x8b && p1[1] == 0x00 && len == 2 && next_pc + 5 <= func_end) {
+                uint8_t *p_load = code + next_pc;
+                int len_load = x86_inst_length(p_load, func_end - next_pc);
+                if (p_load[0] == 0x8b && p_load[1] == 0x4d && len_load == 3 &&
+                    !is_target[next_pc - func_start]) {
+                    uint8_t *p_cmp = p_load + 3;
+                    int len_cmp = x86_inst_length(p_cmp, func_end - (next_pc + 3));
+                    if (p_cmp[0] == 0x39 && p_cmp[1] == 0xc8 && len_cmp == 2 &&
+                        !is_target[next_pc + 3 - func_start]) {
+                        uint8_t *p_jne;
+                        int jne_off;
+                        p1[1] = 0x10; /* mov (%rax), %edx */
+                        p_cmp[1] = 0xca; /* cmp %ecx, %edx */
+                        changed = 1;
+
+                        /* Also check following jne and NOP out reloads of curr in rax */
+                        p_jne = p_cmp + 2;
+                        jne_off = (int)(p_jne - code);
+                        if (jne_off + 6 <= func_end && p_jne[0] == 0x0f && p_jne[1] == 0x85 && !is_target[jne_off - func_start]) {
+                            int32_t jne_rel = (int32_t)read32le(p_jne + 2);
+                            uint8_t *p_fall = p_jne + 6;
+                            int fall_off = jne_off + 6;
+                            uint8_t *p_targ = p_fall + jne_rel;
+                            int targ_off = fall_off + jne_rel;
+
+                            /* Fallthrough: mov [rbp+disp], %rax */
+                            if (fall_off + 4 <= func_end && p_fall[0] == 0x48 && p_fall[1] == 0x8b && p_fall[2] == 0x45 &&
+                                !is_target[fall_off - func_start]) {
+                                emit_nops(p_fall, 4);
+                            }
+                            /* Branch target: mov [rbp+disp], %rax */
+                            if (targ_off >= func_start && targ_off + 4 <= func_end &&
+                                p_targ[0] == 0x48 && p_targ[1] == 0x8b && p_targ[2] == 0x45) {
+                                emit_nops(p_targ, 4);
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Pass P: Loop-Top Induction Variable Reload Elimination */
+            if (p1[0] == 0x8b && ((p1[1] >> 6) & 3) == 1 && ((p1[1] >> 3) & 7) == 0 && (p1[1] & 7) == 5 && len == 3) {
+                uint8_t disp = p1[2];
+                int target_pc = pc;
+                int jump_count = 0, valid_jumps = 0;
+                int scan_pc;
+
+                for (scan_pc = func_start; scan_pc < func_end; ) {
+                    int s_len = x86_inst_length(code + scan_pc, func_end - scan_pc);
+                    if (s_len <= 0) { scan_pc++; continue; }
+
+                    /* 6-byte conditional jump: 0f 80..8f */
+                    if (code[scan_pc] == 0x0f && s_len == 6 && (code[scan_pc + 1] >= 0x80 && code[scan_pc + 1] <= 0x8f)) {
+                        int32_t rel = (int32_t)read32le(code + scan_pc + 2);
+                        int dest = scan_pc + 6 + rel;
+                        if (dest == target_pc) {
+                            jump_count++;
+                            /* Check preceding cmp and mov */
+                            if (scan_pc >= func_start + 6) {
+                                uint8_t *p_cmp = NULL;
+                                if (code[scan_pc - 6] == 0x81 && code[scan_pc - 5] == 0xf8) {
+                                    p_cmp = code + scan_pc - 6;
+                                } else if (code[scan_pc - 3] == 0x83 && code[scan_pc - 2] == 0xf8) {
+                                    p_cmp = code + scan_pc - 3;
+                                }
+                                if (p_cmp) {
+                                    int mov_pc = (int)(p_cmp - code);
+                                    if (mov_pc >= func_start + 3) {
+                                        uint8_t *p_mov = code + mov_pc - 3;
+                                        if ((p_mov[0] == 0x89 && p_mov[1] == 0x45 && p_mov[2] == disp) ||
+                                            (p_mov[0] == 0x8b && p_mov[1] == 0x45 && p_mov[2] == disp)) {
+                                            valid_jumps++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    scan_pc += s_len;
+                }
+
+                if (jump_count > 0 && jump_count == valid_jumps) {
+                    emit_nops(p1, 3);
+                    changed = 1;
+                    pc = next_pc;
+                    continue;
+                }
+            }
+
+            /* Pass Q: Hoist Induction Variable Copy into RCX before RAX arithmetic */
+            if ((p1[0] == 0x90 || (p1[0] == 0x0f && p1[1] == 0x1f && p1[2] == 0x00)) && len >= 2 && next_pc + 9 <= func_end) {
+                int cur_pc = next_pc;
+                int eax_modified = 0, ecx_used = 0;
+                uint8_t *p_load_ecx = NULL;
+
+                while (cur_pc < func_end && !is_target[cur_pc - func_start]) {
+                    int c_len = x86_inst_length(code + cur_pc, func_end - cur_pc);
+                    uint8_t *cp;
+                    if (c_len <= 0) break;
+                    cp = code + cur_pc;
+
+                    /* Stop on control flow or calls */
+                    if (cp[0] == 0xe8 || cp[0] == 0xe9 || cp[0] == 0xeb || cp[0] == 0xc3 || cp[0] == 0xc9 ||
+                        (cp[0] >= 0x70 && cp[0] <= 0x7f) || (cp[0] == 0x0f && (func_end - cur_pc) >= 2 && cp[1] >= 0x80 && cp[1] <= 0x8f))
+                        break;
+
+                    /* Detect mov [rbp+disp], %ecx */
+                    if (cp[0] == 0x8b && cp[1] == 0x4d && c_len == 3) {
+                        p_load_ecx = cp;
+                        disp_i = cp[2];
+                        break;
+                    }
+
+                    /* Check if instruction modifies or uses ecx */
+                    if (reg_modified_by_inst(cp, c_len, 1) || reg_used_by_inst(cp, c_len, 1)) {
+                        ecx_used = 1;
+                        break;
+                    }
+
+                    if (reg_modified_by_inst(cp, c_len, 0)) {
+                        eax_modified = 1;
+                    }
+
+                    cur_pc += c_len;
+                }
+
+                if (p_load_ecx && eax_modified && !ecx_used) {
+                    p1[0] = 0x89;
+                    p1[1] = 0xc1; /* mov %eax, %ecx */
+                    if (len == 3) p1[2] = 0x90;
+                    else if (len > 3) emit_nops(p1 + 2, len - 2);
+                    emit_nops(p_load_ecx, 3);
+                    changed = 1;
+                    pc = next_pc;
+                    continue;
+                }
+            }
+
+            /* Pass M: While-Loop Post-Branch Self-Reload Elimination */
+            if (p1[0] == 0x48 && p1[1] == 0x8b && p1[2] == 0x45 && len == 4 && next_pc + 13 <= func_end) {
+                uint8_t disp = p1[3];
+                uint8_t *p_test = code + next_pc;
+                if (p_test[0] == 0x48 && p_test[1] == 0x85 && p_test[2] == 0xc0 && !is_target[next_pc - func_start]) {
+                    uint8_t *p_je = p_test + 3;
+                    if (p_je[0] == 0x0f && p_je[1] == 0x84 && !is_target[next_pc + 3 - func_start]) {
+                        uint8_t *p_reload = p_je + 6;
+                        if (p_reload[0] == 0x48 && p_reload[1] == 0x8b && p_reload[2] == 0x45 && p_reload[3] == disp &&
+                            !is_target[next_pc + 9 - func_start]) {
+                            emit_nops(p_reload, 4);
+                            changed = 1;
+                        }
+                    }
                 }
             }
 
@@ -3028,6 +3412,14 @@ static int try_optimize_lea(int *pr, int *pfr)
                     shift = shl_p[3];
                     /* move load backwards over the shl instruction */
                     memmove(shl_p, p - load_len, load_len);
+                    if (cur_text_section->reloc) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            if (rel->r_offset >= (addr_t)(p - load_len - data) && rel->r_offset < (addr_t)ind) {
+                                rel->r_offset -= 4;
+                            }
+                        }
+                    }
                     ind -= 4;
                     /* emit lea (%r, %fr, 1<<shift), %fr */
                     rex = 0x48 | (REX_BASE(fr) << 2) | (REX_BASE(fr) << 1) | REX_BASE(r);
