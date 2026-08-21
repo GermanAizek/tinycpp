@@ -283,7 +283,7 @@ def run_cross_test(src_dir, build_dir):
             continue
         test_file = ex3_c if "c67" in cc else tcctest_c
         obj = os.path.join(build_dir, f"test_{cc}.o")
-        flags = ["-I" + build_dir, "-I" + src_dir, "-I" + os.path.join(src_dir, "include")]
+        flags = ["-w", "-I" + build_dir, "-I" + src_dir, "-I" + os.path.join(src_dir, "include")]
         rc, out = run_cmd([exe, "-c", test_file, "-o", obj] + flags)
         if rc != 0:
             print(f"Cross test {cc} on {test_file} failed: {out}")

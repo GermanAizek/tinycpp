@@ -137,7 +137,7 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
     tcc_bdir = os.path.abspath(build_dir)
     
     is_tcc = "tcc" in compiler_name or "t++" in compiler_name
-    math_needed = any(k in bench_basename for k in ("mandelbrot", "nbody", "raytracer", "spectral_norm"))
+    math_needed = any(k in bench_basename for k in ("fft", "mandelbrot", "nbody", "raytracer", "spectral_norm"))
     
     if is_tcc:
         compile_cmd = [compiler_bin, "-B", tcc_bdir, "-I", tcc_include_dir]
