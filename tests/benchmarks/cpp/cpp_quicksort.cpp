@@ -5,48 +5,44 @@
 
 static int arr[SIZE];
 
-void swap_int(int &a, int &b) {
-    int t = a;
-    a = b;
-    b = t;
-}
-
-void quicksort_cpp(int *a, int low, int high) {
+static void quicksort(int *a, int low, int high) {
     if (low < high) {
         int pivot = a[high];
         int i = low - 1;
-        for (int j = low; j < high; j++) {
+        int j, t;
+        for (j = low; j < high; j++) {
             if (a[j] <= pivot) {
                 i++;
-                swap_int(a[i], a[j]);
+                t = a[i]; a[i] = a[j]; a[j] = t;
             }
         }
-        swap_int(a[i + 1], a[high]);
+        t = a[i + 1]; a[i + 1] = a[high]; a[high] = t;
         int p = i + 1;
-        quicksort_cpp(a, low, p - 1);
-        quicksort_cpp(a, p + 1, high);
+        quicksort(a, low, p - 1);
+        quicksort(a, p + 1, high);
     }
 }
 
-int main() {
+int main(void) {
+    int i;
     unsigned int seed = 123456789;
 
-    for (int i = 0; i < SIZE; i++) {
+    for (i = 0; i < SIZE; i++) {
         seed = seed * 1103515245 + 12345;
-        arr[i] = static_cast<int>(seed % 10000000);
+        arr[i] = (int)(seed % 10000000);
     }
 
-    quicksort_cpp(arr, 0, SIZE - 1);
+    quicksort(arr, 0, SIZE - 1);
 
     long long sum = 0;
-    for (int i = 0; i < SIZE; i++) {
+    for (i = 0; i < SIZE; i++) {
         if (i > 0 && arr[i] < arr[i - 1]) {
-            printf("CppSort FAILED at %d!\n", i);
+            printf("Sort FAILED at %d!\n", i);
             return 1;
         }
         sum += (arr[i] % 100);
     }
 
-    printf("CppQuickSort: SIZE=%d Checksum=%lld\n", SIZE, sum);
+    printf("QuickSort: SIZE=%d Checksum=%lld\n", SIZE, sum);
     return 0;
 }

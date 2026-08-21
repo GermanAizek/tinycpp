@@ -2,47 +2,37 @@
 
 #define N 13
 
-class NQueensContext {
-public:
-    int solutions;
-    int col_mask;
-    int diag1_mask;
-    int diag2_mask;
-};
+static int solutions = 0;
+static int col_mask = 0;
+static int diag1_mask = 0;
+static int diag2_mask = 0;
 
-void nqueens_solve(NQueensContext &ctx, int row) {
+static void solve(int row) {
     if (row == N) {
-        ctx.solutions++;
+        solutions++;
         return;
     }
     for (int col = 0; col < N; col++) {
         int d1 = row + col;
         int d2 = row - col + N;
-        if (!(ctx.col_mask & (1 << col)) &&
-            !(ctx.diag1_mask & (1 << d1)) &&
-            !(ctx.diag2_mask & (1 << d2))) {
-            ctx.col_mask ^= (1 << col);
-            ctx.diag1_mask ^= (1 << d1);
-            ctx.diag2_mask ^= (1 << d2);
+        if (!(col_mask & (1 << col)) &&
+            !(diag1_mask & (1 << d1)) &&
+            !(diag2_mask & (1 << d2))) {
+            col_mask ^= (1 << col);
+            diag1_mask ^= (1 << d1);
+            diag2_mask ^= (1 << d2);
 
-            nqueens_solve(ctx, row + 1);
+            solve(row + 1);
 
-            ctx.col_mask ^= (1 << col);
-            ctx.diag1_mask ^= (1 << d1);
-            ctx.diag2_mask ^= (1 << d2);
+            col_mask ^= (1 << col);
+            diag1_mask ^= (1 << d1);
+            diag2_mask ^= (1 << d2);
         }
     }
 }
 
-int main() {
-    NQueensContext ctx;
-    ctx.solutions = 0;
-    ctx.col_mask = 0;
-    ctx.diag1_mask = 0;
-    ctx.diag2_mask = 0;
-
-    nqueens_solve(ctx, 0);
-
-    printf("CppNQueens: N=%d Solutions=%d\n", N, ctx.solutions);
+int main(void) {
+    solve(0);
+    printf("NQueens: N=%d Solutions=%d\n", N, solutions);
     return 0;
 }

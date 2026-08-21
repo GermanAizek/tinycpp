@@ -2,8 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-namespace TextDistance {
-
 static int min3(int a, int b, int c) {
     int m = a;
     if (b < m) m = b;
@@ -11,7 +9,7 @@ static int min3(int a, int b, int c) {
     return m;
 }
 
-static int compute(const char *s1, int len1, const char *s2, int len2, int *dp) {
+static int levenshtein_dist(const char *s1, int len1, const char *s2, int len2, int *dp) {
     for (int i = 0; i <= len1; i++) dp[i * (len2 + 1) + 0] = i;
     for (int j = 0; j <= len2; j++) dp[0 * (len2 + 1) + j] = j;
 
@@ -27,26 +25,26 @@ static int compute(const char *s1, int len1, const char *s2, int len2, int *dp) 
     return dp[len1 * (len2 + 1) + len2];
 }
 
-} // namespace TextDistance
-
 #define STR_LEN 800
 #define NUM_PAIRS 120
 
 int main(void) {
-    char *s1 = static_cast<char*>(malloc(STR_LEN + 1));
-    char *s2 = static_cast<char*>(malloc(STR_LEN + 1));
-    int *dp = static_cast<int*>(malloc(sizeof(int) * (STR_LEN + 1) * (STR_LEN + 1)));
-    if (s1 == nullptr || s2 == nullptr || dp == nullptr) return 1;
+    char *s1 = (char *)malloc(STR_LEN + 1);
+    char *s2 = (char *)malloc(STR_LEN + 1);
+    int *dp = (int *)malloc(sizeof(int) * (STR_LEN + 1) * (STR_LEN + 1));
+    if (!s1 || !s2 || !dp) return 1;
 
     unsigned int seed = 1234567;
     long long total_dist = 0;
 
     for (int p = 0; p < NUM_PAIRS; p++) {
+        /* Generate pseudo-random DNA strings with variations */
         const char *alphabet = "ACGT";
         for (int i = 0; i < STR_LEN; i++) {
             seed = seed * 1664525 + 1013904223;
             s1[i] = alphabet[seed % 4];
             seed = seed * 1664525 + 1013904223;
+            /* 80% same, 20% mutations */
             if ((seed % 100) < 80) {
                 s2[i] = s1[i];
             } else {
@@ -56,10 +54,10 @@ int main(void) {
         s1[STR_LEN] = '\0';
         s2[STR_LEN] = '\0';
 
-        total_dist += TextDistance::compute(s1, STR_LEN, s2, STR_LEN, dp);
+        total_dist += levenshtein_dist(s1, STR_LEN, s2, STR_LEN, dp);
     }
 
-    printf("CPP_Levenshtein: Pairs=%d Len=%d TotalDist=%lld\n", NUM_PAIRS, STR_LEN, total_dist);
+    printf("Levenshtein: Pairs=%d Len=%d TotalDist=%lld\n", NUM_PAIRS, STR_LEN, total_dist);
 
     free(s1);
     free(s2);

@@ -13,8 +13,6 @@ typedef unsigned char uint8;
 #define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ ((x) >> 3))
 #define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
 
-namespace Security {
-
 static const uint32 K[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -26,107 +24,122 @@ static const uint32 K[64] = {
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
 };
 
-struct SHA256Context {
+typedef struct {
     uint32 state[8];
     uint32 count[2];
     uint8 buffer[64];
-};
+} SHA256_CTX;
 
-static void transform(SHA256Context &ctx, const uint8 *data) {
+static void sha256_transform(SHA256_CTX *ctx, const uint8 data[64]) {
     uint32 a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
 
     for (i = 0, j = 0; i < 16; ++i, j += 4)
-        m[i] = (static_cast<uint32>(data[j]) << 24) |
-               (static_cast<uint32>(data[j + 1]) << 16) |
-               (static_cast<uint32>(data[j + 2]) << 8) |
-               (static_cast<uint32>(data[j + 3]));
+        m[i] = ((uint32)data[j] << 24) | ((uint32)data[j + 1] << 16) | ((uint32)data[j + 2] << 8) | ((uint32)data[j + 3]);
     for (; i < 64; ++i)
         m[i] = SIG1(m[i - 2]) + m[i - 7] + SIG0(m[i - 15]) + m[i - 16];
 
-    a = ctx.state[0]; b = ctx.state[1]; c = ctx.state[2]; d = ctx.state[3];
-    e = ctx.state[4]; f = ctx.state[5]; g = ctx.state[6]; h = ctx.state[7];
+    a = ctx->state[0];
+    b = ctx->state[1];
+    c = ctx->state[2];
+    d = ctx->state[3];
+    e = ctx->state[4];
+    f = ctx->state[5];
+    g = ctx->state[6];
+    h = ctx->state[7];
 
     for (i = 0; i < 64; ++i) {
         t1 = h + EP1(e) + CH(e, f, g) + K[i] + m[i];
         t2 = EP0(a) + MAJ(a, b, c);
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
     }
 
-    ctx.state[0] += a; ctx.state[1] += b; ctx.state[2] += c; ctx.state[3] += d;
-    ctx.state[4] += e; ctx.state[5] += f; ctx.state[6] += g; ctx.state[7] += h;
+    ctx->state[0] += a;
+    ctx->state[1] += b;
+    ctx->state[2] += c;
+    ctx->state[3] += d;
+    ctx->state[4] += e;
+    ctx->state[5] += f;
+    ctx->state[6] += g;
+    ctx->state[7] += h;
 }
 
-static void init(SHA256Context &ctx) {
-    ctx.state[0] = 0x6a09e667;
-    ctx.state[1] = 0xbb67ae85;
-    ctx.state[2] = 0x3c6ef372;
-    ctx.state[3] = 0xa54ff53a;
-    ctx.state[4] = 0x510e527f;
-    ctx.state[5] = 0x9b05688c;
-    ctx.state[6] = 0x1f83d9ab;
-    ctx.state[7] = 0x5be0cd19;
-    ctx.count[0] = ctx.count[1] = 0;
+static void sha256_init(SHA256_CTX *ctx) {
+    ctx->state[0] = 0x6a09e667;
+    ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372;
+    ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f;
+    ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab;
+    ctx->state[7] = 0x5be0cd19;
+    ctx->count[0] = ctx->count[1] = 0;
 }
 
-static void update(SHA256Context &ctx, const uint8 *data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        ctx.buffer[ctx.count[0] & 63] = data[i];
-        ctx.count[0]++;
-        if ((ctx.count[0] & 63) == 0)
-            transform(ctx, ctx.buffer);
+static void sha256_update(SHA256_CTX *ctx, const uint8 *data, size_t len) {
+    size_t i;
+    for (i = 0; i < len; ++i) {
+        ctx->buffer[ctx->count[0] & 63] = data[i];
+        ctx->count[0]++;
+        if ((ctx->count[0] & 63) == 0)
+            sha256_transform(ctx, ctx->buffer);
     }
 }
 
-static void finalize(SHA256Context &ctx, uint8 hash[32]) {
-    uint32 i = ctx.count[0] & 63;
-    ctx.buffer[i++] = 0x80;
+static void sha256_final(SHA256_CTX *ctx, uint8 hash[32]) {
+    uint32 i = ctx->count[0] & 63;
+    ctx->buffer[i++] = 0x80;
     if (i > 56) {
-        while (i < 64) ctx.buffer[i++] = 0x00;
-        transform(ctx, ctx.buffer);
-        memset(ctx.buffer, 0, 56);
+        while (i < 64) ctx->buffer[i++] = 0x00;
+        sha256_transform(ctx, ctx->buffer);
+        memset(ctx->buffer, 0, 56);
     } else {
-        while (i < 56) ctx.buffer[i++] = 0x00;
+        while (i < 56) ctx->buffer[i++] = 0x00;
     }
-    uint32 total_bits = ctx.count[0] * 8;
-    ctx.buffer[56] = 0; ctx.buffer[57] = 0; ctx.buffer[58] = 0; ctx.buffer[59] = 0;
-    ctx.buffer[60] = (total_bits >> 24) & 0xff;
-    ctx.buffer[61] = (total_bits >> 16) & 0xff;
-    ctx.buffer[62] = (total_bits >> 8) & 0xff;
-    ctx.buffer[63] = total_bits & 0xff;
-    transform(ctx, ctx.buffer);
+    uint32 total_bits = ctx->count[0] * 8;
+    ctx->buffer[56] = 0; ctx->buffer[57] = 0; ctx->buffer[58] = 0; ctx->buffer[59] = 0;
+    ctx->buffer[60] = (total_bits >> 24) & 0xff;
+    ctx->buffer[61] = (total_bits >> 16) & 0xff;
+    ctx->buffer[62] = (total_bits >> 8) & 0xff;
+    ctx->buffer[63] = total_bits & 0xff;
+    sha256_transform(ctx, ctx->buffer);
 
     for (i = 0; i < 4; ++i) {
         for (int j = 0; j < 8; ++j) {
-            hash[j * 4 + i] = (ctx.state[j] >> (24 - i * 8)) & 0x000000ff;
+            hash[j * 4 + i] = (ctx->state[j] >> (24 - i * 8)) & 0x000000ff;
         }
     }
 }
 
-} // namespace Security
-
 int main(void) {
     uint8 data[1024];
     for (int i = 0; i < 1024; i++) {
-        data[i] = static_cast<uint8>((i * 37 + 101) & 0xFF);
+        data[i] = (uint8)((i * 37 + 101) & 0xFF);
     }
 
     uint8 hash[32];
-    Security::SHA256Context ctx;
+    SHA256_CTX ctx;
 
+    /* Hash in loop: 25,000 blocks of 1KB */
     int iterations = 25000;
-    Security::init(ctx);
+    sha256_init(&ctx);
     for (int it = 0; it < iterations; it++) {
-        Security::update(ctx, data, sizeof(data));
+        sha256_update(&ctx, data, sizeof(data));
     }
-    Security::finalize(ctx, hash);
+    sha256_final(&ctx, hash);
 
     unsigned long long checksum = 0;
     for (int i = 0; i < 32; i++) {
-        checksum += (static_cast<unsigned long long>(hash[i])) << ((i % 8) * 8);
+        checksum += ((unsigned long long)hash[i]) << ((i % 8) * 8);
     }
 
-    printf("CPP_SHA256: Iters=%d Hash=%02x%02x%02x%02x Checksum=%llu\n",
+    printf("SHA256: Iters=%d Hash=%02x%02x%02x%02x Checksum=%llu\n",
            iterations, hash[0], hash[1], hash[2], hash[3], checksum);
     return 0;
 }

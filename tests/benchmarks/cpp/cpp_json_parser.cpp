@@ -2,80 +2,73 @@
 #include <stdlib.h>
 #include <string.h>
 
-namespace JSON {
+typedef enum { JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT } JsonType;
 
-enum Type { JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT };
-
-struct Value {
-    Type type;
+typedef struct JsonValue {
+    JsonType type;
     union {
-        bool bool_val;
+        int bool_val;
         double num_val;
         char *str_val;
         struct {
-            Value **elements;
+            struct JsonValue **elements;
             int count;
         } array;
         struct {
             char **keys;
-            Value **values;
+            struct JsonValue **values;
             int count;
         } object;
     } u;
-};
+} JsonValue;
 
-struct Arena {
+typedef struct {
     char *data;
     size_t size;
     size_t capacity;
-};
+} Arena;
 
-static void arena_init(Arena &a, size_t cap) {
-    a.data = static_cast<char*>(malloc(cap));
-    a.size = 0;
-    a.capacity = cap;
+static Arena* arena_create(size_t capacity) {
+    Arena *a = (Arena *)malloc(sizeof(Arena));
+    a->data = (char *)malloc(capacity);
+    a->size = 0;
+    a->capacity = capacity;
+    return a;
 }
 
-static void arena_destroy(Arena &a) {
-    if (a.data != nullptr) {
-        free(a.data);
-        a.data = nullptr;
-    }
-}
-
-static void* arena_alloc(Arena &a, size_t s) {
-    size_t aligned = (s + 7) & ~7;
-    if (a.size + aligned > a.capacity) return nullptr;
-    void *ptr = a.data + a.size;
-    a.size += aligned;
+static void* arena_alloc(Arena *a, size_t size) {
+    size_t aligned = (size + 7) & ~7;
+    if (a->size + aligned > a->capacity) return NULL;
+    void *ptr = a->data + a->size;
+    a->size += aligned;
     return ptr;
 }
 
-static void arena_reset(Arena &a) {
-    a.size = 0;
+static void arena_reset(Arena *a) {
+    a->size = 0;
 }
 
-static const char* skip_ws(const char *p) {
+static const char* skip_whitespace(const char *p) {
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     return p;
 }
 
-static Value* parse_val(const char **p, Arena &a);
+static JsonValue* parse_value(const char **p, Arena *a);
 
-static Value* parse_arr(const char **p, Arena &a) {
-    (*p)++;
-    Value *v = static_cast<Value*>(arena_alloc(a, sizeof(Value)));
+static JsonValue* parse_array(const char **p, Arena *a) {
+    (*p)++; // Skip '['
+    JsonValue *v = (JsonValue *)arena_alloc(a, sizeof(JsonValue));
     v->type = JSON_ARRAY;
-    v->u.array.elements = static_cast<Value**>(arena_alloc(a, sizeof(Value*) * 64));
+    v->u.array.elements = (JsonValue **)arena_alloc(a, sizeof(JsonValue *) * 64);
     v->u.array.count = 0;
 
-    *p = skip_ws(*p);
+    *p = skip_whitespace(*p);
     if (**p == ']') { (*p)++; return v; }
 
     while (**p) {
-        Value *elem = parse_val(p, a);
+        JsonValue *elem = parse_value(p, a);
         v->u.array.elements[v->u.array.count++] = elem;
-        *p = skip_ws(*p);
+        *p = skip_whitespace(*p);
         if (**p == ',') {
             (*p)++;
         } else if (**p == ']') {
@@ -86,38 +79,38 @@ static Value* parse_arr(const char **p, Arena &a) {
     return v;
 }
 
-static Value* parse_obj(const char **p, Arena &a) {
-    (*p)++;
-    Value *v = static_cast<Value*>(arena_alloc(a, sizeof(Value)));
+static JsonValue* parse_object(const char **p, Arena *a) {
+    (*p)++; // Skip '{'
+    JsonValue *v = (JsonValue *)arena_alloc(a, sizeof(JsonValue));
     v->type = JSON_OBJECT;
-    v->u.object.keys = static_cast<char**>(arena_alloc(a, sizeof(char*) * 32));
-    v->u.object.values = static_cast<Value**>(arena_alloc(a, sizeof(Value*) * 32));
+    v->u.object.keys = (char **)arena_alloc(a, sizeof(char *) * 32);
+    v->u.object.values = (JsonValue **)arena_alloc(a, sizeof(JsonValue *) * 32);
     v->u.object.count = 0;
 
-    *p = skip_ws(*p);
+    *p = skip_whitespace(*p);
     if (**p == '}') { (*p)++; return v; }
 
     while (**p) {
-        *p = skip_ws(*p);
+        *p = skip_whitespace(*p);
         if (**p != '"') break;
         (*p)++;
         const char *k_start = *p;
         while (**p && **p != '"') (*p)++;
         size_t k_len = *p - k_start;
-        char *key = static_cast<char*>(arena_alloc(a, k_len + 1));
+        char *key = (char *)arena_alloc(a, k_len + 1);
         memcpy(key, k_start, k_len);
         key[k_len] = '\0';
         if (**p == '"') (*p)++;
 
-        *p = skip_ws(*p);
+        *p = skip_whitespace(*p);
         if (**p == ':') (*p)++;
 
-        Value *val = parse_val(p, a);
+        JsonValue *val = parse_value(p, a);
         v->u.object.keys[v->u.object.count] = key;
         v->u.object.values[v->u.object.count] = val;
         v->u.object.count++;
 
-        *p = skip_ws(*p);
+        *p = skip_whitespace(*p);
         if (**p == ',') {
             (*p)++;
         } else if (**p == '}') {
@@ -128,19 +121,19 @@ static Value* parse_obj(const char **p, Arena &a) {
     return v;
 }
 
-static Value* parse_val(const char **p, Arena &a) {
-    *p = skip_ws(*p);
-    Value *v = static_cast<Value*>(arena_alloc(a, sizeof(Value)));
+static JsonValue* parse_value(const char **p, Arena *a) {
+    *p = skip_whitespace(*p);
+    JsonValue *v = (JsonValue *)arena_alloc(a, sizeof(JsonValue));
     if (**p == '{') {
-        return parse_obj(p, a);
+        return parse_object(p, a);
     } else if (**p == '[') {
-        return parse_arr(p, a);
+        return parse_array(p, a);
     } else if (**p == '"') {
         (*p)++;
         const char *s_start = *p;
         while (**p && **p != '"') (*p)++;
         size_t s_len = *p - s_start;
-        char *str = static_cast<char*>(arena_alloc(a, s_len + 1));
+        char *str = (char *)arena_alloc(a, s_len + 1);
         memcpy(str, s_start, s_len);
         str[s_len] = '\0';
         if (**p == '"') (*p)++;
@@ -165,26 +158,24 @@ static Value* parse_val(const char **p, Arena &a) {
     }
 }
 
-static double checksum(const Value *v) {
-    if (v == nullptr) return 0.0;
+static double checksum_json(JsonValue *v) {
+    if (!v) return 0.0;
     double sum = 0.0;
     switch (v->type) {
         case JSON_NUMBER: return v->u.num_val;
         case JSON_BOOL: return v->u.bool_val ? 1.0 : 0.0;
-        case JSON_STRING: return static_cast<double>(strlen(v->u.str_val));
+        case JSON_STRING: return (double)strlen(v->u.str_val);
         case JSON_ARRAY:
             for (int i = 0; i < v->u.array.count; i++)
-                sum += checksum(v->u.array.elements[i]);
+                sum += checksum_json(v->u.array.elements[i]);
             return sum;
         case JSON_OBJECT:
             for (int i = 0; i < v->u.object.count; i++)
-                sum += static_cast<double>(strlen(v->u.object.keys[i])) + checksum(v->u.object.values[i]);
+                sum += (double)strlen(v->u.object.keys[i]) + checksum_json(v->u.object.values[i]);
             return sum;
         default: return 0.0;
     }
 }
-
-} // namespace JSON
 
 static const char *SAMPLE_JSON = 
 "{"
@@ -201,20 +192,20 @@ static const char *SAMPLE_JSON =
 "}";
 
 int main(void) {
-    JSON::Arena a;
-    JSON::arena_init(a, 1024 * 1024);
+    Arena *a = arena_create(1024 * 1024);
     double total_sum = 0.0;
 
     int iterations = 100000;
     for (int i = 0; i < iterations; i++) {
         const char *p = SAMPLE_JSON;
-        JSON::Value *root = JSON::parse_val(&p, a);
-        total_sum += JSON::checksum(root);
-        JSON::arena_reset(a);
+        JsonValue *root = parse_value(&p, a);
+        total_sum += checksum_json(root);
+        arena_reset(a);
     }
 
-    printf("CPP_JSONParser: Iters=%d Checksum=%.1f\n", iterations, total_sum);
+    printf("JSONParser: Iters=%d Checksum=%.1f\n", iterations, total_sum);
 
-    JSON::arena_destroy(a);
+    free(a->data);
+    free(a);
     return 0;
 }
