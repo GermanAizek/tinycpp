@@ -373,48 +373,7 @@ static void gen_modrm32(int opcode, int op_reg, int r, Sym *sym, int c)
     gen_modrm_impl(opcode, 0, op_reg, r, sym, c);
 }
 
-static struct {
-    int offset;
-    int reg;
-    int is64;
-    int ind;
-} last_local_store = { 0, 0, 0, -1 };
 
-static int reg_local_offset[NB_REGS];
-static int reg_local_is64[NB_REGS];
-
-ST_FUNC void clear_local_reg_cache(void)
-{
-    memset(reg_local_offset, 0, sizeof(reg_local_offset));
-    memset(reg_local_is64, 0, sizeof(reg_local_is64));
-    last_local_store.ind = -1;
-}
-
-static void invalidate_reg_cache(int r)
-{
-    if (r >= 0 && r < NB_REGS) {
-        reg_local_offset[r] = 0;
-        reg_local_is64[r] = 0;
-    }
-}
-
-static void invalidate_local_offset(int fc)
-{
-    int i;
-    for (i = 0; i < NB_REGS; i++) {
-        if (reg_local_offset[i] == fc) {
-            reg_local_offset[i] = 0;
-            reg_local_is64[i] = 0;
-        }
-    }
-}
-
-ST_FUNC int is_reg_cached(int r)
-{
-    if (tcc_state->optimize > 0 && r >= 0 && r < NB_REGS)
-        return reg_local_offset[r] != 0;
-    return 0;
-}
 
 /* load 'r' from value 'sv' */
 void load(int r, SValue *sv)
@@ -459,8 +418,8 @@ void load(int r, SValue *sv)
                 fr = get_reg(RC_INT);
             load(fr, &v1);
             fr |= VT_LVAL;
-        }
-	if (fc != sv->c.i) {
+            fc = 0;
+        } else if (fc != sv->c.i) {
 	    /* If the addends doesn't fit into a 32bit signed
 	       we must use a 64bit move.  We've checked above
 	       that this doesn't have a sym associated.  */
@@ -511,39 +470,11 @@ void load(int r, SValue *sv)
             /* Can happen with zero size structs */
             return;
         } else {
-            assert(((ft & VT_BTYPE) == VT_INT)
-                   || ((ft & VT_BTYPE) == VT_LLONG)
-                   || ((ft & VT_BTYPE) == VT_PTR)
-                   || ((ft & VT_BTYPE) == VT_FUNC)
-                );
             ll = is64_type(ft);
             b = 0x8b;
         }
-        if (tcc_state->optimize > 0 && (fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && fc == (signed char)fc) {
-            if (reg_local_offset[r] == fc && reg_local_is64[r] == ll)
-                return;
-            if (r < 16) {
-                int src;
-                for (src = 0; src < 16; src++) {
-                    if (src != r && reg_local_offset[src] == fc && reg_local_is64[src] == ll) {
-                        orex(ll, r, src, 0x89);
-                        o(0xc0 + REG_VALUE(r) + REG_VALUE(src) * 8);
-                        reg_local_offset[r] = fc;
-                        reg_local_is64[r] = ll;
-                        return;
-                    }
-                }
-            }
-        }
         gen_modrm_impl(b, ll, r, fr, sv->sym, fc);
-        if (tcc_state->optimize > 0 && (fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && fc == (signed char)fc && r < NB_REGS) {
-            reg_local_offset[r] = fc;
-            reg_local_is64[r] = ll;
-        } else {
-            invalidate_reg_cache(r);
-        }
     } else {
-        invalidate_reg_cache(r);
         if (v == VT_CONST) {
             if (fr & VT_SYM) {
 #ifdef TCC_TARGET_PE
@@ -692,31 +623,12 @@ void store(int r, SValue *v)
             ll = 1;
     }
     gen_modrm_impl(opc, ll, r, fr, v->sym, fc);
-    if ((fr & (VT_VALMASK | VT_SYM)) == VT_LOCAL && opc == 0x89) {
-        last_local_store.offset = fc;
-        last_local_store.reg = r;
-        last_local_store.is64 = ll;
-        last_local_store.ind = ind;
-        if (tcc_state->optimize > 0 && fc == (signed char)fc) {
-            invalidate_local_offset(fc);
-            if (r < NB_REGS) {
-                reg_local_offset[r] = fc;
-                reg_local_is64[r] = ll;
-            }
-        }
-    } else {
-        last_local_store.ind = -1;
-        if (tcc_state->optimize > 0 && (fr & VT_LVAL) && (fr & VT_VALMASK) == VT_LOCAL) {
-            invalidate_local_offset(fc);
-        }
-    }
 }
 
 /* 'is_jmp' is '1' if it is a jump */
 static void gcall_or_jmp(int is_jmp)
 {
     int r;
-    clear_local_reg_cache();
     if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST &&
 	((vtop->r & VT_SYM) && (vtop->c.i-4) == (int)(vtop->c.i-4))) {
         /* constant symbolic case -> simple relocation */
@@ -1082,6 +994,8 @@ void gfunc_prolog(Sym *func_sym)
 #endif
 }
 
+static void x86_64_optimize_func(int func_start, int func_end);
+
 /* generate function epilog */
 void gfunc_epilog(void)
 {
@@ -1126,6 +1040,9 @@ void gfunc_epilog(void)
 
     /* add the "func_scratch" area after each alloca seen */
     gsym_addr(func_alloca, -func_scratch);
+
+    if (tcc_state->optimize >= 2 && func_ind >= 0)
+        x86_64_optimize_func(func_ind, ind);
 }
 
 #else
@@ -1518,10 +1435,6 @@ void gfunc_call(int nb_args)
 static void push_arg_reg(int i) {
     loc -= 8;
     gen_modrm64(0x89, arg_regs[i], VT_LOCAL, NULL, loc);
-    if (tcc_state->optimize > 0 && arg_regs[i] < NB_REGS) {
-        reg_local_offset[arg_regs[i]] = loc;
-        reg_local_is64[arg_regs[i]] = 1;
-    }
 }
 
 /* generate function prolog of type 't' */
@@ -1533,8 +1446,6 @@ void gfunc_prolog(Sym *func_sym)
     int param_addr = 0, reg_param_index, sse_param_index;
     Sym *sym;
     CType *type;
-
-    clear_local_reg_cache();
 
     sym = func_type->ref;
     addr = PTR_SIZE * 2;
@@ -1617,7 +1528,8 @@ void gfunc_prolog(Sym *func_sym)
     /* if the function returns a structure, then add an
        implicit pointer parameter */
     if (ret_mode == x86_64_mode_memory) {
-        push_arg_reg(reg_param_index);
+        loc -= 8;
+        gen_modrm64(0x89, arg_regs[reg_param_index], VT_LOCAL, NULL, loc);
         func_vc = loc;
         reg_param_index++;
     }
@@ -1626,9 +1538,9 @@ void gfunc_prolog(Sym *func_sym)
         type = &sym->type;
         mode = classify_x86_64_arg(type, NULL, &size, &align, &reg_count);
         switch (mode) {
-        case x86_64_mode_sse:
-	    if (tcc_state->nosse)
-	        tcc_error("SSE disabled but floating point arguments used");
+        case x86_64_mode_sse: {
+            if (tcc_state->nosse)
+                tcc_error("SSE disabled but floating point arguments used");
             if (sse_param_index + reg_count <= 8) {
                 /* save arguments passed by register */
                 loc -= reg_count * 8;
@@ -1643,6 +1555,7 @@ void gfunc_prolog(Sym *func_sym)
                 addr += size;
             }
             break;
+        }
             
         case x86_64_mode_memory:
         case x86_64_mode_x87:
@@ -1678,6 +1591,8 @@ void gfunc_prolog(Sym *func_sym)
 #endif
 }
 
+static void x86_64_optimize_func(int func_start, int func_end);
+
 /* generate function epilog */
 void gfunc_epilog(void)
 {
@@ -1703,9 +1618,1048 @@ void gfunc_epilog(void)
     o(0xec8148);  /* sub rsp, stacksize */
     gen_le32(v);
     ind = saved_ind;
+
+    if (tcc_state->optimize >= 2 && func_ind >= 0)
+        x86_64_optimize_func(func_ind, ind);
 }
 
 #endif /* not PE */
+
+static void emit_nops(uint8_t *p, int n)
+{
+    while (n > 0) {
+        if (n >= 8) {
+            p[0] = 0x0f; p[1] = 0x1f; p[2] = 0x84; p[3] = 0x00;
+            p[4] = 0x00; p[5] = 0x00; p[6] = 0x00; p[7] = 0x00;
+            p += 8; n -= 8;
+        } else if (n == 7) {
+            p[0] = 0x0f; p[1] = 0x1f; p[2] = 0x80; p[3] = 0x00;
+            p[4] = 0x00; p[5] = 0x00; p[6] = 0x00;
+            p += 7; n -= 7;
+        } else if (n == 6) {
+            p[0] = 0x66; p[1] = 0x0f; p[2] = 0x1f; p[3] = 0x44;
+            p[4] = 0x00; p[5] = 0x00;
+            p += 6; n -= 6;
+        } else if (n == 5) {
+            p[0] = 0x0f; p[1] = 0x1f; p[2] = 0x44; p[3] = 0x00;
+            p[4] = 0x00;
+            p += 5; n -= 5;
+        } else if (n == 4) {
+            p[0] = 0x0f; p[1] = 0x1f; p[2] = 0x40; p[3] = 0x00;
+            p += 4; n -= 4;
+        } else if (n == 3) {
+            p[0] = 0x0f; p[1] = 0x1f; p[2] = 0x00;
+            p += 3; n -= 3;
+        } else if (n == 2) {
+            p[0] = 0x66; p[1] = 0x90;
+            p += 2; n -= 2;
+        } else {
+            p[0] = 0x90;
+            p += 1; n -= 1;
+        }
+    }
+}
+
+static int x86_inst_length(const uint8_t *p, int max_len)
+{
+    int len = 0;
+    int has_rex = 0, rex = 0;
+    int op, op2, mod, rm, sib;
+    uint8_t modrm;
+
+    if (max_len <= 0) return 0;
+
+    /* Consume prefixes */
+    while (len < max_len) {
+        uint8_t b = p[len];
+        if (b == 0x66 || b == 0x67 || b == 0xf2 || b == 0xf3) { len++; }
+        else if (b >= 0x40 && b <= 0x4f) { has_rex = 1; rex = b; len++; }
+        else if (b == 0x2e || b == 0x36 || b == 0x3e || b == 0x26 || b == 0x64 || b == 0x65) { len++; }
+        else break;
+    }
+    if (len >= max_len) return len;
+
+    op = p[len++];
+    if (op == 0x90) return len; /* NOP */
+    if (op == 0xc3 || op == 0xc9 || op == 0xcc || op == 0xcb || op == 0xcf) return len; /* ret, leave, int3... */
+    if (op >= 0x50 && op <= 0x5f) return len; /* push / pop reg */
+
+    if (op == 0xeb || (op >= 0x70 && op <= 0x7f)) {
+        return len + 1;
+    }
+    if (op == 0xe9 || op == 0xe8) {
+        return len + 4;
+    }
+
+    if (op >= 0xb8 && op <= 0xbf) {
+        if (has_rex && (rex & 8)) return len + 8;
+        return len + 4;
+    }
+    if (op >= 0xb0 && op <= 0xb7) {
+        return len + 1;
+    }
+
+    if (op == 0x0f) {
+        if (len >= max_len) return len;
+        op2 = p[len++];
+        if (op2 >= 0x80 && op2 <= 0x8f) {
+            return len + 4;
+        }
+        if (len >= max_len) return len;
+        modrm = p[len++];
+        mod = (modrm >> 6) & 3;
+        rm = modrm & 7;
+        if (mod != 3 && rm == 4) {
+            if (len < max_len) {
+                sib = p[len++];
+                if (mod == 0 && (sib & 7) == 5) len += 4;
+            }
+        }
+        if (mod == 1) len += 1;
+        else if (mod == 2) len += 4;
+        else if (mod == 0 && rm == 5) len += 4;
+        return len;
+    }
+
+    if (op == 0x89 || op == 0x8b || op == 0x8d || op == 0x88 || op == 0x8a ||
+        op == 0x01 || op == 0x03 || op == 0x29 || op == 0x2b || op == 0x31 || op == 0x33 ||
+        op == 0x39 || op == 0x3b || op == 0x85 || op == 0x63) {
+        if (len >= max_len) return len;
+        modrm = p[len++];
+        mod = (modrm >> 6) & 3;
+        rm = modrm & 7;
+        if (mod != 3 && rm == 4) {
+            if (len < max_len) {
+                sib = p[len++];
+                if (mod == 0 && (sib & 7) == 5) len += 4;
+            }
+        }
+        if (mod == 1) len += 1;
+        else if (mod == 2) len += 4;
+        else if (mod == 0 && rm == 5) len += 4;
+        return len;
+    }
+
+    if (op == 0x81 || op == 0xc7) {
+        if (len >= max_len) return len;
+        modrm = p[len++];
+        mod = (modrm >> 6) & 3;
+        rm = modrm & 7;
+        if (mod != 3 && rm == 4) {
+            if (len < max_len) {
+                sib = p[len++];
+                if (mod == 0 && (sib & 7) == 5) len += 4;
+            }
+        }
+        if (mod == 1) len += 1;
+        else if (mod == 2) len += 4;
+        else if (mod == 0 && rm == 5) len += 4;
+        return len + 4;
+    }
+    if (op == 0x83 || op == 0x80 || op == 0xc0 || op == 0xc1) {
+        if (len >= max_len) return len;
+        modrm = p[len++];
+        mod = (modrm >> 6) & 3;
+        rm = modrm & 7;
+        if (mod != 3 && rm == 4) {
+            if (len < max_len) {
+                sib = p[len++];
+                if (mod == 0 && (sib & 7) == 5) len += 4;
+            }
+        }
+        if (mod == 1) len += 1;
+        else if (mod == 2) len += 4;
+        else if (mod == 0 && rm == 5) len += 4;
+        return len + 1;
+    }
+    if (op == 0xd0 || op == 0xd1 || op == 0xd2 || op == 0xd3 || op == 0xf6 || op == 0xf7 || op == 0xfe || op == 0xff) {
+        if (len >= max_len) return len;
+        modrm = p[len++];
+        mod = (modrm >> 6) & 3;
+        rm = modrm & 7;
+        if (mod != 3 && rm == 4) {
+            if (len < max_len) {
+                sib = p[len++];
+                if (mod == 0 && (sib & 7) == 5) len += 4;
+            }
+        }
+        if (mod == 1) len += 1;
+        else if (mod == 2) len += 4;
+        else if (mod == 0 && rm == 5) len += 4;
+        if ((op == 0xf6 && ((modrm >> 3) & 7) == 0) || (op == 0xf7 && ((modrm >> 3) & 7) == 0)) {
+            return len + (op == 0xf6 ? 1 : 4);
+        }
+        return len;
+    }
+
+    return 1;
+}
+
+static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
+{
+    int rex = 0;
+    int op, mod, r_reg, r_rm, i = 0;
+    int is_sse = 0;
+
+    if (len <= 0) return 0;
+
+    while (i < len) {
+        if (p[i] >= 0x40 && p[i] <= 0x4f) {
+            rex = p[i]; i++;
+        } else if (p[i] == 0x66 || p[i] == 0xf2 || p[i] == 0xf3) {
+            is_sse = 1; i++;
+        } else if (p[i] == 0x67 || p[i] == 0x2e || p[i] == 0x36 || p[i] == 0x3e || p[i] == 0x26 || p[i] == 0x64 || p[i] == 0x65) {
+            i++;
+        } else break;
+    }
+    if (i >= len) return 0;
+
+    op = p[i++];
+    if (op == 0x90) return 0; /* NOP */
+    if (op == 0xe8) return (reg != 3 && reg != 5 && reg < 12); /* call modifies caller-saved regs */
+
+    /* SSE multi-byte instructions: 0x0f ... */
+    if (op == 0x0f) {
+        uint8_t op2;
+        if (i >= len) return 0;
+        op2 = p[i++];
+        if (op2 == 0x1f) return 0; /* NOP */
+        if (is_sse || op2 == 0x28 || op2 == 0x29 || op2 == 0x54 || op2 == 0x56 || op2 == 0x57) {
+            if (op2 == 0x2c || op2 == 0x2d) { /* cvtsd2si / cvtss2si */
+                if (i < len) {
+                    r_reg = ((p[i] >> 3) & 7) | ((rex & 4) ? 8 : 0);
+                    return r_reg == reg;
+                }
+            }
+            return 0; /* Pure SSE instructions do not modify GP registers! */
+        }
+        if (op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf || op2 == 0xaf) {
+            if (i < len) {
+                r_reg = ((p[i] >> 3) & 7) | ((rex & 4) ? 8 : 0);
+                return r_reg == reg;
+            }
+        }
+        return 1;
+    }
+
+    /* mov imm to reg: b8+r */
+    if (op >= 0xb8 && op <= 0xbf) {
+        int dreg = (op - 0xb8) | ((rex & 1) ? 8 : 0);
+        return dreg == reg;
+    }
+    if (op >= 0xb0 && op <= 0xb7) {
+        int dreg = (op - 0xb0) | ((rex & 1) ? 8 : 0);
+        return dreg == reg;
+    }
+
+    /* Instructions with ModR/M */
+    if (i < len) {
+        uint8_t modrm = p[i];
+        mod = (modrm >> 6) & 3;
+        r_reg = ((modrm >> 3) & 7) | ((rex & 4) ? 8 : 0);
+        r_rm = (modrm & 7) | ((rex & 1) ? 8 : 0);
+
+        if (op == 0x8b || op == 0x8d || op == 0x63 || op == 0x03 || op == 0x13 || op == 0x23 || op == 0x33 || op == 0x0b || op == 0x2b) {
+            return r_reg == reg;
+        }
+        if (op == 0x89 || op == 0x01 || op == 0x29 || op == 0x31 || op == 0x11 || op == 0x21 || op == 0x09) {
+            if (mod == 3) return r_rm == reg;
+            return 0;
+        }
+        if (op == 0x81 || op == 0x83 || op == 0xc1 || op == 0xd1 || op == 0xff || op == 0xfe) {
+            if (mod == 3) return r_rm == reg;
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void x86_64_optimize_func(int func_start, int func_end)
+{
+    uint8_t *code;
+    int func_len;
+    uint8_t *is_target;
+    int pc, next_pc, len, len2, left, next_left, pass;
+    uint8_t op;
+    int target;
+    uint8_t *p1, *p2, *p, *fp;
+    int f_pc, f_left, f_len;
+
+    if (!cur_text_section || !cur_text_section->data)
+        return;
+    if (func_start < 0 || func_end <= func_start)
+        return;
+
+    code = cur_text_section->data;
+    func_len = func_end - func_start;
+    if (func_len < 8)
+        return;
+
+    is_target = (uint8_t *)tcc_mallocz(func_len + 16);
+    if (!is_target)
+        return;
+
+    /* Mark all jump and call targets */
+    for (pc = func_start; pc < func_end; ) {
+        left = func_end - pc;
+        len = x86_inst_length(code + pc, left);
+        if (len <= 0) len = 1;
+        op = code[pc];
+
+        if (op == 0xeb || (op >= 0x70 && op <= 0x7f)) {
+            target = pc + 2 + (int8_t)code[pc + 1];
+            if (target >= func_start && target <= func_end)
+                is_target[target - func_start] = 1;
+        } else if (op == 0xe9 || op == 0xe8) {
+            target = pc + 5 + (int32_t)read32le(code + pc + 1);
+            if (target >= func_start && target <= func_end)
+                is_target[target - func_start] = 1;
+        } else if (op == 0x0f && left >= 6 && code[pc + 1] >= 0x80 && code[pc + 1] <= 0x8f) {
+            target = pc + 6 + (int32_t)read32le(code + pc + 2);
+            if (target >= func_start && target <= func_end)
+                is_target[target - func_start] = 1;
+        }
+        pc += len;
+    }
+
+    /* Mark relocation targets */
+    if (cur_text_section->reloc) {
+        ElfW_Rel *rel;
+        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+            int r_off = (int)rel->r_offset;
+            if (r_off >= func_start && r_off <= func_end) {
+                is_target[r_off - func_start] = 1;
+            }
+        }
+    }
+
+    /* Run optimization passes */
+    for (pass = 0; pass < 4; pass++) {
+        int changed = 0;
+
+        /* Pass A: Self-Reload & Consecutive Redundant Stack Loads */
+        for (pc = func_start; pc < func_end; ) {
+            left = func_end - pc;
+            len = x86_inst_length(code + pc, left);
+            if (len <= 0) { pc++; continue; }
+            next_pc = pc + len;
+            if (next_pc >= func_end) break;
+            next_left = func_end - next_pc;
+            len2 = x86_inst_length(code + next_pc, next_left);
+            if (len2 <= 0) { pc = next_pc; continue; }
+
+            if (is_target[next_pc - func_start]) {
+                pc = next_pc;
+                continue;
+            }
+
+            p1 = code + pc;
+            p2 = code + next_pc;
+
+            /* 1. 32-bit integer: mov %reg, [rbp+disp] followed by mov [rbp+disp], %reg */
+            if (p1[0] == 0x89 && p2[0] == 0x8b && p1[1] == p2[1]) {
+                int mod = (p1[1] >> 6) & 3;
+                int rm = p1[1] & 7;
+                if ((mod == 1 && rm == 5 && len == 3 && len2 == 3 && p1[2] == p2[2]) ||
+                    (mod == 2 && rm == 5 && len == 6 && len2 == 6 && memcmp(p1 + 2, p2 + 2, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* 2. 64-bit integer: mov %reg64, [rbp+disp] followed by mov [rbp+disp], %reg64 */
+            if (p1[0] == 0x48 && p1[1] == 0x89 && p2[0] == 0x48 && p2[1] == 0x8b && p1[2] == p2[2]) {
+                int mod = (p1[2] >> 6) & 3;
+                int rm = p1[2] & 7;
+                if ((mod == 1 && rm == 5 && len == 4 && len2 == 4 && p1[3] == p2[3]) ||
+                    (mod == 2 && rm == 5 && len == 7 && len2 == 7 && memcmp(p1 + 3, p2 + 3, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* 3. 64-bit float XMM: movq [rbp+disp], %xmm followed by movq %xmm, [rbp+disp] */
+            if (p1[0] == 0x66 && p1[1] == 0x0f && p1[2] == 0xd6 &&
+                p2[0] == 0xf3 && p2[1] == 0x0f && p2[2] == 0x7e && p1[3] == p2[3]) {
+                int mod = (p1[3] >> 6) & 3;
+                int rm = p1[3] & 7;
+                if ((mod == 1 && rm == 5 && len == 5 && len2 == 5 && p1[4] == p2[4]) ||
+                    (mod == 2 && rm == 5 && len == 8 && len2 == 8 && memcmp(p1 + 4, p2 + 4, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* 4. Consecutive identical float reload */
+            if (p1[0] == 0xf3 && p1[1] == 0x0f && p1[2] == 0x7e &&
+                p2[0] == 0xf3 && p2[1] == 0x0f && p2[2] == 0x7e && p1[3] == p2[3]) {
+                int mod = (p1[3] >> 6) & 3;
+                int rm = p1[3] & 7;
+                if ((mod == 1 && rm == 5 && len == 5 && len2 == 5 && p1[4] == p2[4]) ||
+                    (mod == 2 && rm == 5 && len == 8 && len2 == 8 && memcmp(p1 + 4, p2 + 4, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* 5. Consecutive identical 32-bit int reload */
+            if (p1[0] == 0x8b && p2[0] == 0x8b && p1[1] == p2[1]) {
+                int mod = (p1[1] >> 6) & 3;
+                int rm = p1[1] & 7;
+                if ((mod == 1 && rm == 5 && len == 3 && len2 == 3 && p1[2] == p2[2]) ||
+                    (mod == 2 && rm == 5 && len == 6 && len2 == 6 && memcmp(p1 + 2, p2 + 2, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* 6. Consecutive identical 64-bit int reload */
+            if (p1[0] == 0x48 && p1[1] == 0x8b && p2[0] == 0x48 && p2[1] == 0x8b && p1[2] == p2[2]) {
+                int mod = (p1[2] >> 6) & 3;
+                int rm = p1[2] & 7;
+                if ((mod == 1 && rm == 5 && len == 4 && len2 == 4 && p1[3] == p2[3]) ||
+                    (mod == 2 && rm == 5 && len == 7 && len2 == 7 && memcmp(p1 + 3, p2 + 3, 4) == 0)) {
+                    emit_nops(p2, len2);
+                    changed = 1;
+                    pc = next_pc + len2;
+                    continue;
+                }
+            }
+
+            /* Pass B: LEA + SIB Dereference Fusion */
+            if (p1[0] == 0x48 && p1[1] == 0x8d && p1[2] == 0x04 && len == 4) {
+                uint8_t sib = p1[3];
+                /* Case: movq (%rax), %xmm -> load into XMM */
+                if (p2[0] == 0xf3 && p2[1] == 0x0f && p2[2] == 0x7e && (p2[3] & 0xc7) == 0x00 && len2 == 4) {
+                    uint8_t xmm_reg = (p2[3] >> 3) & 7;
+                    p1[0] = 0xf3; p1[1] = 0x0f; p1[2] = 0x7e; p1[3] = 0x04 | (xmm_reg << 3);
+                    p1[4] = sib;
+                    emit_nops(p1 + 5, 3);
+                    changed = 1;
+                    pc = next_pc + 4;
+                    continue;
+                }
+                /* Case: movq %xmm, (%rax) -> store from XMM */
+                if (p2[0] == 0x66 && p2[1] == 0x0f && p2[2] == 0xd6 && (p2[3] & 0xc7) == 0x00 && len2 == 4) {
+                    uint8_t xmm_reg = (p2[3] >> 3) & 7;
+                    p1[0] = 0x66; p1[0] = 0x0f; p1[2] = 0xd6; p1[3] = 0x04 | (xmm_reg << 3);
+                    p1[4] = sib;
+                    emit_nops(p1 + 5, 3);
+                    changed = 1;
+                    pc = next_pc + 4;
+                    continue;
+                }
+            }
+
+            /* Pass E: Duplicate Subexpression Elimination after Store */
+            if (p1[0] == 0x89 || (p1[0] == 0x48 && p1[1] == 0x89)) {
+                int L;
+                for (L = 16; L >= 4; L--) {
+                    if (pc >= func_start + L && next_pc + L <= func_end) {
+                        int ok = 1, k;
+                        for (k = 0; k < L; k++) {
+                            if (is_target[next_pc + k - func_start]) { ok = 0; break; }
+                        }
+                        if (ok && memcmp(code + pc - L, code + next_pc, L) == 0) {
+                            emit_nops(code + next_pc, L);
+                            changed = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            /* Pass F: Preserve Primary Index Register across Secondary Offset Computation */
+            if (p1[0] == 0x89 && ((p1[1] >> 6) & 3) != 3 && ((p1[1] >> 3) & 7) == 0 && (p1[1] & 7) == 5) {
+                int mod1 = (p1[1] >> 6) & 3;
+                int disp1 = (mod1 == 1) ? (int8_t)p1[2] : (int)read32le(p1 + 2);
+                int cur = next_pc;
+
+                while (cur < func_end && !is_target[cur - func_start]) {
+                    int c_len = x86_inst_length(code + cur, func_end - cur);
+                    if (c_len <= 0) break;
+                    if (code[cur] == 0x90 || (code[cur] == 0x0f && code[cur + 1] == 0x1f) || (code[cur] == 0x66 && code[cur + 1] == 0x90)) {
+                        cur += c_len;
+                    } else break;
+                }
+
+                if (cur < func_end && !is_target[cur - func_start] && code[cur] == 0x8b &&
+                    (((code[cur + 1] >> 6) & 3) == 1 || ((code[cur + 1] >> 6) & 3) == 2) &&
+                    ((code[cur + 1] >> 3) & 7) == 1 && (code[cur + 1] & 7) == 5) {
+                    int load2_len = 2 + (((code[cur + 1] >> 6) & 3) == 1 ? 1 : 4);
+                    int add_pc = cur + load2_len;
+
+                    if (add_pc + 2 <= func_end && !is_target[add_pc - func_start] &&
+                        code[add_pc] == 0x01 && code[add_pc + 1] == 0xc8) {
+                        int store2_pc = add_pc + 2;
+
+                        if (store2_pc < func_end && !is_target[store2_pc - func_start] && code[store2_pc] == 0x89 &&
+                            (((code[store2_pc + 1] >> 6) & 3) == 1 || ((code[store2_pc + 1] >> 6) & 3) == 2) &&
+                            ((code[store2_pc + 1] >> 3) & 7) == 0 && (code[store2_pc + 1] & 7) == 5) {
+                            int store2_len = 2 + (((code[store2_pc + 1] >> 6) & 3) == 1 ? 1 : 4);
+                            int reload_pc = store2_pc + store2_len;
+
+                            if (reload_pc < func_end && !is_target[reload_pc - func_start] && code[reload_pc] == 0x8b &&
+                                (((code[reload_pc + 1] >> 6) & 3) == 1 || ((code[reload_pc + 1] >> 6) & 3) == 2) &&
+                                ((code[reload_pc + 1] >> 3) & 7) == 0 && (code[reload_pc + 1] & 7) == 5) {
+                                int r_mod = (code[reload_pc + 1] >> 6) & 3;
+                                int r_disp = (r_mod == 1) ? (int8_t)code[reload_pc + 2] : (int)read32le(code + reload_pc + 2);
+                                int reload_len = 2 + (r_mod == 1 ? 1 : 4);
+
+                                if (r_disp == disp1) {
+                                    code[add_pc + 1] = 0xc1;
+                                    code[store2_pc + 1] = (code[store2_pc + 1] & ~0x38) | (1 << 3);
+                                    emit_nops(code + reload_pc, reload_len);
+                                    changed = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Pass G: LEA Destination Redirection to RDX to Preserve RAX */
+            if (p1[0] == 0x48 && p1[1] == 0x8d && p1[2] == 0x04 && p1[3] == 0xc1 && len == 4) {
+                int s_pc = next_pc;
+                int rdx_used = 0;
+                int rax_used = 0;
+                while (s_pc < func_end && !is_target[s_pc - func_start]) {
+                    int s_len = x86_inst_length(code + s_pc, func_end - s_pc);
+                    uint8_t *sp;
+                    if (s_len <= 0) break;
+                    sp = code + s_pc;
+
+                    if (sp[0] == 0xe8 || sp[0] == 0xe9 || sp[0] == 0xeb || sp[0] == 0xc3 || sp[0] == 0xc9 ||
+                        (sp[0] >= 0x70 && sp[0] <= 0x7f) || (sp[0] == 0x0f && (func_end - s_pc) >= 2 && sp[1] >= 0x80 && sp[1] <= 0x8f))
+                        break;
+
+                    if (sp[0] == 0x66 && sp[1] == 0x0f && sp[2] == 0xd6 && (sp[3] & 0xc7) == 0x00 && s_len == 4) {
+                        if (!rdx_used && !rax_used) {
+                            p1[2] = 0x14;
+                            sp[3] = (sp[3] & ~7) | 2;
+                            changed = 1;
+                        }
+                        break;
+                    }
+
+                    {
+                        int si = 0;
+                        while (si < s_len && (sp[si] == 0x66 || sp[si] == 0xf2 || sp[si] == 0xf3 || (sp[si] >= 0x40 && sp[si] <= 0x4f)))
+                            si++;
+                        if (si < s_len && sp[si] == 0x0f) si++;
+                        if (si + 1 < s_len) {
+                            uint8_t smodrm = sp[si + 1];
+                            int smod = (smodrm >> 6) & 3;
+                            int srm = smodrm & 7;
+                            if (smod == 0 && srm == 0) { rax_used = 1; break; }
+                        }
+                    }
+
+                    if (reg_modified_by_inst(sp, s_len, 2)) {
+                        rdx_used = 1;
+                        break;
+                    }
+
+                    s_pc += s_len;
+                }
+            }
+
+            /* Pass H: Forward Store-Forwarding for Temporary Float Variables */
+            if (p1[0] == 0x66 && p1[1] == 0x0f && p1[2] == 0xd6 &&
+                (((p1[3] >> 6) & 3) == 1 || ((p1[3] >> 6) & 3) == 2) &&
+                ((p1[3] >> 3) & 7) == 0 && (p1[3] & 7) == 5) {
+                int mod1 = (p1[3] >> 6) & 3;
+                int disp_temp = (mod1 == 1) ? (int8_t)p1[4] : (int)read32le(p1 + 4);
+                int s_len1 = 4 + (mod1 == 1 ? 1 : 4);
+
+                int f_pc = pc + s_len1;
+                while (f_pc < func_end && !is_target[f_pc - func_start]) {
+                    int f_left = func_end - f_pc;
+                    int f_len = x86_inst_length(code + f_pc, f_left);
+                    uint8_t *fp;
+                    if (f_len <= 0) break;
+                    fp = code + f_pc;
+
+                    if (fp[0] == 0xe8 || fp[0] == 0xe9 || fp[0] == 0xeb || fp[0] == 0xc3 || fp[0] == 0xc9 ||
+                        (fp[0] >= 0x70 && fp[0] <= 0x7f) || (fp[0] == 0x0f && f_left >= 2 && fp[1] >= 0x80 && fp[1] <= 0x8f))
+                        break;
+
+                    /* Check if fp is load from [rbp+disp_temp] into %xmm0: f3 0f 7e ... */
+                    if (fp[0] == 0xf3 && fp[1] == 0x0f && fp[2] == 0x7e &&
+                        (((fp[3] >> 6) & 3) == 1 || ((fp[3] >> 6) & 3) == 2) &&
+                        ((fp[3] >> 3) & 7) == 0 && (fp[3] & 7) == 5) {
+                        int f_mod = (fp[3] >> 6) & 3;
+                        int f_disp = (f_mod == 1) ? (int8_t)fp[4] : (int)read32le(fp + 4);
+                        int f_load_len = 4 + (f_mod == 1 ? 1 : 4);
+                        if (f_disp == disp_temp) {
+                            int next_s = f_pc + f_load_len;
+                            while (next_s < func_end && !is_target[next_s - func_start]) {
+                                int ns_len = x86_inst_length(code + next_s, func_end - next_s);
+                                if (ns_len <= 0) break;
+                                if (code[next_s] == 0x90 || (code[next_s] == 0x0f && code[next_s + 1] == 0x1f) || (code[next_s] == 0x66 && code[next_s + 1] == 0x90)) {
+                                    next_s += ns_len;
+                                } else break;
+                            }
+                            if (next_s < func_end && !is_target[next_s - func_start] &&
+                                code[next_s] == 0x66 && code[next_s + 1] == 0x0f && code[next_s + 2] == 0xd6 &&
+                                (((code[next_s + 3] >> 6) & 3) == 1 || ((code[next_s + 3] >> 6) & 3) == 2) &&
+                                ((code[next_s + 3] >> 3) & 7) == 0 && (code[next_s + 3] & 7) == 5) {
+                                int t_mod = (code[next_s + 3] >> 6) & 3;
+                                int disp_target = (t_mod == 1) ? (int8_t)code[next_s + 4] : (int)read32le(code + next_s + 4);
+                                int t_store_len = 4 + (t_mod == 1 ? 1 : 4);
+
+                                /* Verify no instruction between pc and f_pc touched disp_target */
+                                int check_pc = pc + s_len1;
+                                int ok = 1;
+                                while (check_pc < f_pc) {
+                                    int ch_len = x86_inst_length(code + check_pc, f_pc - check_pc);
+                                    uint8_t *cp = code + check_pc;
+                                    if (ch_len <= 0) break;
+                                    if ((cp[0] == 0xf3 && cp[1] == 0x0f && cp[2] == 0x7e) ||
+                                        (cp[0] == 0x66 && cp[1] == 0x0f && cp[2] == 0xd6)) {
+                                        int cmod = (cp[3] >> 6) & 3;
+                                        if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                            int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                            if (cdisp == disp_target) { ok = 0; break; }
+                                        }
+                                    } else if (cp[0] == 0xf2 && cp[1] == 0x0f && (cp[2] == 0x58 || cp[2] == 0x59 || cp[2] == 0x5c || cp[2] == 0x5e)) {
+                                        int cmod = (cp[3] >> 6) & 3;
+                                        if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                            int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                            if (cdisp == disp_target) { ok = 0; break; }
+                                        }
+                                    }
+                                    check_pc += ch_len;
+                                }
+
+                                if (ok) {
+                                    if (t_mod == 1) {
+                                        p1[3] = (p1[3] & ~0xc0) | 0x40;
+                                        p1[4] = (uint8_t)(int8_t)disp_target;
+                                        if (s_len1 > 5) emit_nops(p1 + 5, s_len1 - 5);
+                                    } else {
+                                        p1[3] = (p1[3] & ~0xc0) | 0x80;
+                                        write32le(p1 + 4, disp_target);
+                                    }
+                                    emit_nops(fp, f_load_len);
+                                    emit_nops(code + next_s, t_store_len);
+                                    changed = 1;
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    f_pc += f_len;
+                }
+            }
+
+            /* Pass I: XMM2 Stash & Forward for Temporary Float Variables */
+            /* movq %xmm0, [rbp+disp_temp] (8 bytes) ... (uses only xmm0/1) ...
+               movq [rbp+disp_temp], %xmm0 (8 bytes); movq %xmm0, [rbp+disp_target] (5 bytes)
+               -> movapd %xmm0, %xmm2 (4 bytes) + NOPs ...
+                  NOPs ... movq %xmm2, [rbp+disp_target] (5 bytes)
+            */
+            if (p1[0] == 0x66 && p1[1] == 0x0f && p1[2] == 0xd6 &&
+                (((p1[3] >> 6) & 3) == 1 || ((p1[3] >> 6) & 3) == 2) &&
+                ((p1[3] >> 3) & 7) == 0 && (p1[3] & 7) == 5) {
+                int mod1 = (p1[3] >> 6) & 3;
+                int disp_temp = (mod1 == 1) ? (int8_t)p1[4] : (int)read32le(p1 + 4);
+                int s_len1 = 4 + (mod1 == 1 ? 1 : 4);
+
+                int f_pc = pc + s_len1;
+                int xmm2_used = 0;
+                while (f_pc < func_end && !is_target[f_pc - func_start]) {
+                    int f_left = func_end - f_pc;
+                    int f_len = x86_inst_length(code + f_pc, f_left);
+                    uint8_t *fp;
+                    if (f_len <= 0) break;
+                    fp = code + f_pc;
+
+                    if (fp[0] == 0xe8 || fp[0] == 0xe9 || fp[0] == 0xeb || fp[0] == 0xc3 || fp[0] == 0xc9 ||
+                        (fp[0] >= 0x70 && fp[0] <= 0x7f) || (fp[0] == 0x0f && f_left >= 2 && fp[1] >= 0x80 && fp[1] <= 0x8f))
+                        break;
+
+                    /* Check if fp is reload of disp_temp into %xmm0: f3 0f 7e */
+                    if (fp[0] == 0xf3 && fp[1] == 0x0f && fp[2] == 0x7e &&
+                        (((fp[3] >> 6) & 3) == 1 || ((fp[3] >> 6) & 3) == 2) &&
+                        ((fp[3] >> 3) & 7) == 0 && (fp[3] & 7) == 5) {
+                        int f_mod = (fp[3] >> 6) & 3;
+                        int f_disp = (f_mod == 1) ? (int8_t)fp[4] : (int)read32le(fp + 4);
+                        int f_load_len = 4 + (f_mod == 1 ? 1 : 4);
+                        if (f_disp == disp_temp) {
+                            int next_s = f_pc + f_load_len;
+                            while (next_s < func_end && !is_target[next_s - func_start]) {
+                                int ns_len = x86_inst_length(code + next_s, func_end - next_s);
+                                if (ns_len <= 0) break;
+                                if (code[next_s] == 0x90 || (code[next_s] == 0x0f && code[next_s + 1] == 0x1f) || (code[next_s] == 0x66 && code[next_s + 1] == 0x90)) {
+                                    next_s += ns_len;
+                                } else break;
+                            }
+                            if (next_s < func_end && !is_target[next_s - func_start] &&
+                                code[next_s] == 0x66 && code[next_s + 1] == 0x0f && code[next_s + 2] == 0xd6 &&
+                                (((code[next_s + 3] >> 6) & 3) == 1 || ((code[next_s + 3] >> 6) & 3) == 2) &&
+                                ((code[next_s + 3] >> 3) & 7) == 0 && (code[next_s + 3] & 7) == 5) {
+                                if (!xmm2_used && s_len1 >= 4) {
+                                    /* Rewrite p1 to movapd %xmm0, %xmm2: 66 0f 28 d0 */
+                                    p1[0] = 0x66; p1[1] = 0x0f; p1[2] = 0x28; p1[3] = 0xd0;
+                                    if (s_len1 > 4) emit_nops(p1 + 4, s_len1 - 4);
+                                    /* Eliminate reload */
+                                    emit_nops(fp, f_load_len);
+                                    /* Change store from xmm0 to xmm2: modrm reg=2 */
+                                    code[next_s + 3] = (code[next_s + 3] & ~0x38) | (2 << 3);
+                                    changed = 1;
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    /* Check if fp touches xmm2 */
+                    if (fp[0] == 0x66 || fp[0] == 0xf2 || fp[0] == 0xf3) {
+                        int si = 1;
+                        if (fp[si] == 0x0f) si++;
+                        if (si < f_len) {
+                            uint8_t m = fp[si + 1];
+                            int r1 = (m >> 3) & 7;
+                            int r2 = m & 7;
+                            if (r1 == 2 || (((m >> 6) & 3) == 3 && r2 == 2))
+                                xmm2_used = 1;
+                        }
+                    }
+
+                    f_pc += f_len;
+                }
+            }
+
+            /* Pass J: Local Float Variable Promotion to XMM4-XMM7 */
+            if (p1[0] == 0x66 && p1[1] == 0x0f && p1[2] == 0xd6 &&
+                (((p1[3] >> 6) & 3) == 1 || ((p1[3] >> 6) & 3) == 2) &&
+                ((p1[3] >> 3) & 7) == 0 && (p1[3] & 7) == 5 && len >= 5) {
+                int mod1 = (p1[3] >> 6) & 3;
+                int disp1 = (mod1 == 1) ? (int8_t)p1[4] : (int)read32le(p1 + 4);
+                int chosen_reg = -1;
+                uint8_t used_xmm[8] = {0};
+                int bb_end = next_pc;
+                int can_promote = 1;
+                int r, chk_pc;
+
+                /* Scan entire basic block to find end and used XMM registers */
+                while (bb_end < func_end && !is_target[bb_end - func_start]) {
+                    int b_len = x86_inst_length(code + bb_end, func_end - bb_end);
+                    uint8_t *bp;
+                    if (b_len <= 0) break;
+                    bp = code + bb_end;
+
+                    if (bp[0] == 0xe8 || bp[0] == 0xe9 || bp[0] == 0xeb || bp[0] == 0xc3 || bp[0] == 0xc9 ||
+                        (bp[0] >= 0x70 && bp[0] <= 0x7f) || (bp[0] == 0x0f && (func_end - bb_end) >= 2 && bp[1] >= 0x80 && bp[1] <= 0x8f))
+                        break;
+
+                    /* Track XMM register usage */
+                    if (bp[0] == 0x66 || bp[0] == 0xf2 || bp[0] == 0xf3) {
+                        int si = 1;
+                        if (bp[si] == 0x0f) si++;
+                        if (si < b_len) {
+                            uint8_t m = bp[si + 1];
+                            int r1 = (m >> 3) & 7;
+                            int r2 = m & 7;
+                            int mod = (m >> 6) & 3;
+                            used_xmm[r1] = 1;
+                            if (mod == 3) used_xmm[r2] = 1;
+                        }
+                    }
+
+                    bb_end += b_len;
+                }
+
+                /* Pick an available XMM register among 4, 5, 6, 7 */
+                for (r = 4; r <= 7; r++) {
+                    if (!used_xmm[r]) {
+                        chosen_reg = r;
+                        break;
+                    }
+                }
+
+                if (chosen_reg >= 4) {
+                    /* Verify disp1 is NEVER accessed anywhere outside [pc, bb_end] in the entire function */
+                    int g_pc = func_start;
+                    while (g_pc < func_end) {
+                        int g_len = x86_inst_length(code + g_pc, func_end - g_pc);
+                        uint8_t *gp = code + g_pc;
+                        if (g_len <= 0) break;
+
+                        if (g_pc < pc || g_pc >= bb_end) {
+                            int mod = -1, r_disp = 0;
+                            if (gp[0] == 0x8b || gp[0] == 0x89) {
+                                mod = (gp[1] >> 6) & 3;
+                                if ((mod == 1 || mod == 2) && (gp[1] & 7) == 5)
+                                    r_disp = (mod == 1) ? (int8_t)gp[2] : (int)read32le(gp + 2);
+                            } else if ((gp[0] == 0xf3 && gp[1] == 0x0f && gp[2] == 0x7e) ||
+                                       (gp[0] == 0x66 && gp[1] == 0x0f && gp[2] == 0xd6)) {
+                                mod = (gp[3] >> 6) & 3;
+                                if ((mod == 1 || mod == 2) && (gp[3] & 7) == 5)
+                                    r_disp = (mod == 1) ? (int8_t)gp[4] : (int)read32le(gp + 4);
+                            } else if (gp[0] == 0xf2 && gp[1] == 0x0f && (gp[2] == 0x58 || gp[2] == 0x59 || gp[2] == 0x5c || gp[2] == 0x5e)) {
+                                mod = (gp[3] >> 6) & 3;
+                                if ((mod == 1 || mod == 2) && (gp[3] & 7) == 5)
+                                    r_disp = (mod == 1) ? (int8_t)gp[4] : (int)read32le(gp + 4);
+                            }
+                            if (mod > 0 && r_disp == disp1) {
+                                can_promote = 0;
+                                break;
+                            }
+                        }
+                        g_pc += g_len;
+                    }
+
+                    if (can_promote) {
+                        /* Verify all accesses to disp1 inside [pc, bb_end] are convertible */
+                        int chk_pc = next_pc;
+                        while (chk_pc < bb_end) {
+                            int chk_len = x86_inst_length(code + chk_pc, bb_end - chk_pc);
+                            uint8_t *cp = code + chk_pc;
+                            if (chk_len <= 0) break;
+
+                            if (cp[0] == 0x66 && cp[1] == 0x0f && cp[2] == 0xd6) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1) { can_promote = 0; break; }
+                                }
+                            } else if (cp[0] == 0xf3 && cp[1] == 0x0f && cp[2] == 0x7e) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1 && ((cp[3] >> 3) & 7) != 0) {
+                                        can_promote = 0; break;
+                                    }
+                                }
+                            } else if (cp[0] == 0xf2 && cp[1] == 0x0f && (cp[2] == 0x58 || cp[2] == 0x59 || cp[2] == 0x5c || cp[2] == 0x5e)) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1 && ((cp[3] >> 3) & 7) != 0) {
+                                        can_promote = 0; break;
+                                    }
+                                }
+                            }
+                            chk_pc += chk_len;
+                        }
+                    }
+
+                    if (can_promote) {
+                        /* 1. Rewrite the store to movapd %xmm_src, %xmmR: 66 0f 28 (0xc0 | (R << 3) | src) */
+                        p1[0] = 0x66; p1[1] = 0x0f; p1[2] = 0x28; p1[3] = 0xc0 | (chosen_reg << 3) | ((p1[3] >> 3) & 7);
+                        if (len > 4) emit_nops(p1 + 4, len - 4);
+
+                        /* 2. Rewrite all loads and arithmetic */
+                        chk_pc = next_pc;
+                        while (chk_pc < bb_end) {
+                            int chk_len = x86_inst_length(code + chk_pc, bb_end - chk_pc);
+                            uint8_t *cp = code + chk_pc;
+                            if (chk_len <= 0) break;
+
+                            if (cp[0] == 0xf3 && cp[1] == 0x0f && cp[2] == 0x7e) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1) {
+                                        /* movapd %xmmR, %xmm_dest: 66 0f 28 (0xc0 | (dest << 3) | R) */
+                                        cp[0] = 0x66; cp[1] = 0x0f; cp[2] = 0x28; cp[3] = 0xc0 | (cp[3] & 0x38) | chosen_reg;
+                                        if (chk_len > 4) emit_nops(cp + 4, chk_len - 4);
+                                    }
+                                }
+                            } else if (cp[0] == 0xf2 && cp[1] == 0x0f && (cp[2] == 0x58 || cp[2] == 0x59 || cp[2] == 0x5c || cp[2] == 0x5e)) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1) {
+                                        /* f2 0f <op> (0xc0 | (dest << 3) | R) */
+                                        cp[3] = 0xc0 | (cp[3] & 0x38) | chosen_reg;
+                                        if (chk_len > 4) emit_nops(cp + 4, chk_len - 4);
+                                    }
+                                }
+                            }
+                            chk_pc += chk_len;
+                        }
+                        changed = 1;
+                    }
+                }
+            }
+
+            pc = next_pc;
+        }
+
+        /* Pass D: Redundant Index & 64-bit Register Forward Load Elimination */
+        for (pc = func_start; pc < func_end; ) {
+            left = func_end - pc;
+            len = x86_inst_length(code + pc, left);
+            if (len <= 0) { pc++; continue; }
+            p = code + pc;
+
+            /* Check for movslq %eax, %rax (48 63 c0) */
+            if (p[0] == 0x48 && p[1] == 0x63 && p[2] == 0xc0) {
+                int b_pc = pc;
+                int disp = 0;
+                int found_slot = 0;
+                while (b_pc > func_start) {
+                    int prev_pc = func_start;
+                    uint8_t *bp;
+                    int bp_len;
+                    while (prev_pc < b_pc) {
+                        int p_len = x86_inst_length(code + prev_pc, b_pc - prev_pc);
+                        if (p_len <= 0 || prev_pc + p_len >= b_pc) break;
+                        prev_pc += p_len;
+                    }
+                    if (prev_pc >= b_pc) break;
+                    bp = code + prev_pc;
+                    bp_len = b_pc - prev_pc;
+
+                    /* Skip NOPs */
+                    if (bp[0] == 0x90 || (bp[0] == 0x0f && bp[1] == 0x1f) || (bp[0] == 0x66 && bp[1] == 0x90)) {
+                        b_pc = prev_pc;
+                        continue;
+                    }
+
+                    /* Check if bp is load from [rbp+disp] into %eax */
+                    if (bp[0] == 0x8b && (((bp[1] >> 6) & 3) == 1 || ((bp[1] >> 6) & 3) == 2) &&
+                        ((bp[1] >> 3) & 7) == 0 && (bp[1] & 7) == 5) {
+                        int b_mod = (bp[1] >> 6) & 3;
+                        disp = (b_mod == 1) ? (int8_t)bp[2] : (int)read32le(bp + 2);
+                        found_slot = 1;
+                        break;
+                    }
+
+                    /* Check if bp is store of %eax to [rbp+disp] */
+                    if (bp[0] == 0x89 && (((bp[1] >> 6) & 3) == 1 || ((bp[1] >> 6) & 3) == 2) &&
+                        ((bp[1] >> 3) & 7) == 0 && (bp[1] & 7) == 5) {
+                        int b_mod = (bp[1] >> 6) & 3;
+                        disp = (b_mod == 1) ? (int8_t)bp[2] : (int)read32le(bp + 2);
+                        found_slot = 1;
+                        break;
+                    }
+
+                    if (reg_modified_by_inst(bp, bp_len, 0))
+                        break;
+
+                    b_pc = prev_pc;
+                }
+
+                if (found_slot) {
+                    f_pc = pc + 3;
+                    while (f_pc < func_end) {
+                        if (is_target[f_pc - func_start]) break;
+                        f_left = func_end - f_pc;
+                        f_len = x86_inst_length(code + f_pc, f_left);
+                        if (f_len <= 0) break;
+                        fp = code + f_pc;
+
+                        if (fp[0] == 0xe8 || fp[0] == 0xe9 || fp[0] == 0xeb || fp[0] == 0xc3 || fp[0] == 0xc9 ||
+                            (fp[0] >= 0x70 && fp[0] <= 0x7f) || (fp[0] == 0x0f && f_left >= 2 && fp[1] >= 0x80 && fp[1] <= 0x8f))
+                            break;
+
+                        if (fp[0] == 0x8b && (((fp[1] >> 6) & 3) == 1 || ((fp[1] >> 6) & 3) == 2) &&
+                            ((fp[1] >> 3) & 7) == 0 && (fp[1] & 7) == 5) {
+                            int f_mod = (fp[1] >> 6) & 3;
+                            int f_disp = (f_mod == 1) ? (int8_t)fp[2] : (int)read32le(fp + 2);
+                            int f_load_len = 2 + (f_mod == 1 ? 1 : 4);
+                            if (f_disp == disp) {
+                                int f_next = f_pc + f_load_len;
+                                while (f_next < func_end && !is_target[f_next - func_start]) {
+                                    int fn_len = x86_inst_length(code + f_next, func_end - f_next);
+                                    if (fn_len <= 0) break;
+                                    if (code[f_next] == 0x90 || (code[f_next] == 0x0f && code[f_next + 1] == 0x1f) || (code[f_next] == 0x66 && code[f_next + 1] == 0x90)) {
+                                        f_next += fn_len;
+                                    } else break;
+                                }
+                                if (f_next + 3 <= func_end && !is_target[f_next - func_start] &&
+                                    code[f_next] == 0x48 && code[f_next + 1] == 0x63 && code[f_next + 2] == 0xc0) {
+                                    emit_nops(fp, f_load_len);
+                                    emit_nops(code + f_next, 3);
+                                    changed = 1;
+                                    f_pc = f_next + 3;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (reg_modified_by_inst(fp, f_len, 0))
+                            break;
+
+                        if ((fp[0] == 0x89 && fp[1] == 0x45) || (fp[0] == 0x89 && fp[1] == 0x85) ||
+                            (fp[0] == 0x48 && fp[1] == 0x89 && fp[2] == 0x45) || (fp[0] == 0x48 && fp[1] == 0x89 && fp[2] == 0x85)) {
+                            int s_mod = (fp[0] == 0x48 ? fp[2] >> 6 : fp[1] >> 6) & 3;
+                            int s_disp = (s_mod == 1) ? (int8_t)fp[fp[0] == 0x48 ? 3 : 2] : (int)read32le(fp + (fp[0] == 0x48 ? 3 : 2));
+                            if (s_disp == disp) break;
+                        }
+
+                        f_pc += f_len;
+                    }
+                }
+            }
+
+            /* Check for 64-bit load to Reg: 48 8b <modrm> [disp] */
+            if (p[0] == 0x48 && p[1] == 0x8b && ((p[2] & 0xf8) == 0x40 || (p[2] & 0xf8) == 0x80) && (p[2] & 7) == 5) {
+                int mod = (p[2] >> 6) & 3;
+                int reg = (p[2] >> 3) & 7;
+                int disp_len = (mod == 1) ? 1 : 4;
+                int load_len = 3 + disp_len;
+                int disp = (mod == 1) ? (int8_t)p[3] : (int)read32le(p + 3);
+
+                f_pc = pc + load_len;
+                while (f_pc < func_end) {
+                    if (is_target[f_pc - func_start]) break;
+                    f_left = func_end - f_pc;
+                    f_len = x86_inst_length(code + f_pc, f_left);
+                    if (f_len <= 0) break;
+                    fp = code + f_pc;
+
+                    if (fp[0] == 0xe8 || fp[0] == 0xe9 || fp[0] == 0xeb || fp[0] == 0xc3 || fp[0] == 0xc9 ||
+                        (fp[0] >= 0x70 && fp[0] <= 0x7f) || (fp[0] == 0x0f && f_left >= 2 && fp[1] >= 0x80 && fp[1] <= 0x8f))
+                        break;
+
+                    if (fp[0] == 0x48 && fp[1] == 0x8b && fp[2] == p[2] && f_len == load_len) {
+                        int f_disp = (mod == 1) ? (int8_t)fp[3] : (int)read32le(fp + 3);
+                        if (f_disp == disp) {
+                            emit_nops(fp, f_len);
+                            changed = 1;
+                            f_pc += f_len;
+                            continue;
+                        }
+                    }
+
+                    if (reg_modified_by_inst(fp, f_len, reg))
+                        break;
+
+                    if (fp[0] == 0x48 && fp[1] == 0x89 && fp[2] == (0x45 | (mod == 1 ? 0 : 0x40) | (reg << 3))) {
+                        int s_disp = (mod == 1) ? (int8_t)fp[3] : (int)read32le(fp + 3);
+                        if (s_disp == disp) break;
+                    }
+
+                    f_pc += f_len;
+                }
+            }
+
+            pc += len;
+        }
+
+        if (!changed)
+            break;
+    }
+
+    tcc_free(is_target);
+}
 
 ST_FUNC void gen_fill_nops(int bytes)
 {
@@ -1716,7 +2670,6 @@ ST_FUNC void gen_fill_nops(int bytes)
 /* generate a jump to a label */
 int gjmp(int t)
 {
-    clear_local_reg_cache();
     return gjmp2(0xe9, t);
 }
 
@@ -1724,7 +2677,6 @@ int gjmp(int t)
 void gjmp_addr(int a)
 {
     int r;
-    clear_local_reg_cache();
     r = a - ind - 2;
     if (r == (signed char)r) {
         g(0xeb);
@@ -1750,7 +2702,6 @@ ST_FUNC int gjmp_append(int n, int t)
 
 ST_FUNC int gjmp_cond(int op, int t)
 {
-        clear_local_reg_cache();
         if (op & 0x100)
 	  {
 	    /* This was a float compare.  If the parity flag is set
@@ -1821,7 +2772,7 @@ static int try_optimize_rotate(int op, int ll)
     uint8_t *p;
     int r, fr;
     int sz1;
-    int opc2, opc1, s2, s1;
+    int opc2, opc1, s2;
     uint8_t *p_shift2, *p_shift1;
     
     if (op != '|' && op != '^')
@@ -1877,7 +2828,6 @@ static int try_optimize_rotate(int op, int ll)
     p_shift1 = NULL;
     sz1 = 0;
     opc1 = -1;
-    s1 = 0;
     
     for (int eval_len = 2; eval_len <= 48; eval_len++) {
         int cur_sz = 0;
@@ -1958,7 +2908,6 @@ static int try_optimize_rotate(int op, int ll)
                     p_shift1 = cand_shift1;
                     sz1 = cur_sz;
                     opc1 = cur_opc;
-                    s1 = cur_s;
                     break;
                 }
             }
@@ -2020,6 +2969,77 @@ static int find_fast_div_s32(int32_t d, int32_t *out_m, int *out_s)
     if (d == 1000) { *out_m = 0x10624dd3; *out_s = 38; return 1; }
     if (d == 10000) { *out_m = (int32_t)0xd1b71759; *out_s = 45; return 1; }
     if (d == 10000000) { *out_m = (int32_t)0x6b5fca6b; *out_s = 54; return 1; }
+    return 0;
+}
+
+static int try_optimize_lea(int *pr, int *pfr)
+{
+    uint8_t *data = cur_text_section->data;
+    uint8_t *p = data + ind;
+    int r = *pr, fr = *pfr;
+    int shift, rex, modrm, sib;
+
+    if (tcc_state->optimize == 0)
+        return 0;
+    if (r < 0 || r >= 16 || fr < 0 || fr >= 16 || r == fr)
+        return 0;
+
+    /* Check if previous 4 bytes are: [0x48 | REX_BASE(fr), 0xc1, 0xe0 | REG_VALUE(fr), shift] */
+    if (REG_VALUE(r) != 5 && REG_VALUE(fr) != 4 && ind >= 4 &&
+        p[-4] == (0x48 | REX_BASE(fr)) &&
+        p[-3] == 0xc1 &&
+        p[-2] == (0xe0 | REG_VALUE(fr)) &&
+        p[-1] >= 1 && p[-1] <= 3) {
+        shift = p[-1];
+        rex = 0x48 | (REX_BASE(r) << 2) | (REX_BASE(fr) << 1) | REX_BASE(r);
+        modrm = 0x04 | (REG_VALUE(r) << 3);
+        sib = (shift << 6) | (REG_VALUE(fr) << 3) | REG_VALUE(r);
+        p[-4] = rex;
+        p[-3] = 0x8d;
+        p[-2] = modrm;
+        p[-1] = sib;
+        return 1;
+    }
+    /* Check if previous 4 bytes are: [0x48 | REX_BASE(r), 0xc1, 0xe0 | REG_VALUE(r), shift] */
+    if (REG_VALUE(fr) != 5 && REG_VALUE(r) != 4 && ind >= 4 &&
+        p[-4] == (0x48 | REX_BASE(r)) &&
+        p[-3] == 0xc1 &&
+        p[-2] == (0xe0 | REG_VALUE(r)) &&
+        p[-1] >= 1 && p[-1] <= 3) {
+        shift = p[-1];
+        rex = 0x48 | (REX_BASE(r) << 2) | (REX_BASE(r) << 1) | REX_BASE(fr);
+        modrm = 0x04 | (REG_VALUE(r) << 3);
+        sib = (shift << 6) | (REG_VALUE(r) << 3) | REG_VALUE(fr);
+        p[-4] = rex;
+        p[-3] = 0x8d;
+        p[-2] = modrm;
+        p[-1] = sib;
+        return 1;
+    }
+    /* Case 3: shl on fr is followed by a load of r (load_len from 2 to 8 bytes) */
+    if (REG_VALUE(r) != 5 && REG_VALUE(fr) != 4) {
+        for (int load_len = 2; load_len <= 8; load_len++) {
+            if (ind >= load_len + 4) {
+                uint8_t *shl_p = p - load_len - 4;
+                if (shl_p[0] == (0x48 | REX_BASE(fr)) &&
+                    shl_p[1] == 0xc1 &&
+                    shl_p[2] == (0xe0 | REG_VALUE(fr)) &&
+                    shl_p[3] >= 1 && shl_p[3] <= 3) {
+                    shift = shl_p[3];
+                    /* move load backwards over the shl instruction */
+                    memmove(shl_p, p - load_len, load_len);
+                    ind -= 4;
+                    /* emit lea (%r, %fr, 1<<shift), %fr */
+                    rex = 0x48 | (REX_BASE(fr) << 2) | (REX_BASE(fr) << 1) | REX_BASE(r);
+                    modrm = 0x04 | (REG_VALUE(fr) << 3);
+                    sib = (shift << 6) | (REG_VALUE(fr) << 3) | REG_VALUE(r);
+                    g(rex); g(0x8d); g(modrm); g(sib);
+                    *pr = fr;
+                    return 1;
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -2088,6 +3108,11 @@ void gen_opi(int op)
             gv2(RC_INT, RC_INT);
             r = vtop[-1].r;
             fr = vtop[0].r;
+            if (op == '+' && ll && try_optimize_lea(&r, &fr)) {
+                vtop[-1].r = r;
+                vtop--;
+                break;
+            }
             if (fr == REG_IRET && r != REG_IRET && (op == '+' || op == '&' || op == '^' || op == '|')) {
                 orex(ll, fr, r, (opc << 3) | 0x01);
                 o(0xc0 + REG_VALUE(fr) + REG_VALUE(r) * 8);
@@ -2320,7 +3345,34 @@ void gen_opi(int op)
             } else {
                 int32_t m = 0;
                 int shift = 0;
-                if (find_fast_div_s32((int32_t)c, &m, &shift)) {
+                if ((c > 0) && (c & (c - 1)) == 0 && (op == '/' || op == TOK_PDIV)) {
+                    int k = 0;
+                    uint32_t tmp = c;
+                    while ((tmp >>= 1) != 0) k++;
+                    vswap();
+                    gv(RC_RAX);
+                    vswap();
+                    vtop--;
+                    save_reg(TREG_RDX);
+                    orex(ll, 0, 0, 0x99); /* cdq / cqo */
+                    if (k == 1) {
+                        orex(ll, TREG_RDX, 0, 0x83);
+                        o(0xe2); g(1); /* and $1, %edx */
+                    } else if (((1ULL << k) - 1) <= 127) {
+                        orex(ll, TREG_RDX, 0, 0x83);
+                        o(0xe2); g((1 << k) - 1);
+                    } else {
+                        orex(ll, TREG_RDX, 0, 0x81);
+                        oad(0xe2, (1 << k) - 1);
+                    }
+                    orex(ll, TREG_RAX, TREG_RDX, 0x01);
+                    o(0xd0); /* add %edx, %eax */
+                    orex(ll, TREG_RAX, 0, (k == 1) ? 0xd1 : 0xc1);
+                    o(0xf8);
+                    if (k > 1) g(k); /* sar $k, %eax */
+                    vtop->r = TREG_RAX;
+                    break;
+                } else if (find_fast_div_s32((int32_t)c, &m, &shift)) {
                     vswap();
                     gv(RC_RAX);
                     vswap();
@@ -2384,41 +3436,6 @@ void gen_opi(int op)
 void gen_opl(int op)
 {
     gen_opi(op);
-}
-
-ST_FUNC void gen_lea(int scale)
-{
-    int r, fr, shift, rex, modrm, sib;
-    gv2(RC_INT, RC_INT);
-    r = vtop[-1].r;
-    fr = vtop[0].r;
-    shift = (scale == 2 ? 1 : (scale == 4 ? 2 : (scale == 8 ? 3 : 0)));
-    if (shift == 0) {
-        orex(1, r, fr, 0x01);
-        o(0xc0 + REG_VALUE(r) + REG_VALUE(fr) * 8);
-    } else {
-        rex = 0x48 | (REX_BASE(r) << 2) | (REX_BASE(fr) << 1) | REX_BASE(r);
-        modrm = 0x04 | (REG_VALUE(r) << 3);
-        sib = (shift << 6) | (REG_VALUE(fr) << 3) | REG_VALUE(r);
-        g(rex); g(0x8d); g(modrm); g(sib);
-    }
-    invalidate_reg_cache(r);
-    vtop--;
-}
-
-ST_FUNC void gen_add_const(int c)
-{
-    int r = gv(RC_INT);
-    if (c == (signed char)c) {
-        orex(1, r, 0, 0x83);
-        o(0xc0 | REG_VALUE(r));
-        g(c);
-    } else {
-        orex(1, r, 0, 0x81);
-        oad(0xc0 | REG_VALUE(r), c);
-    }
-    invalidate_reg_cache(r);
-    vtop->r = r;
 }
 
 /* Emit inline SSE scalar unary operation:
@@ -2927,10 +3944,21 @@ ST_FUNC void gen_struct_copy(int size)
     o(0x5756); /* push rsi, rdi */
 #endif
     gv2(RC_RDI, RC_RSI);
-    if (size == 16) {
+    if (size == 8) {
+        o(0x100ff2); g(0x06); /* movsd (%rsi), %xmm0 */
+        o(0x110ff2); g(0x07); /* movsd %xmm0, (%rdi) */
+    } else if (size == 4) {
+        o(0x100ff3); g(0x06); /* movss (%rsi), %xmm0 */
+        o(0x110ff3); g(0x07); /* movss %xmm0, (%rdi) */
+    } else if (size == 16) {
         /* 128-bit SIMD SSE move */
         o(0x100f); g(0x06); /* movups (%rsi), %xmm0 */
         o(0x110f); g(0x07); /* movups %xmm0, (%rdi) */
+    } else if (size == 24) {
+        o(0x100f); g(0x06); /* movups (%rsi), %xmm0 */
+        o(0x110f); g(0x07); /* movups %xmm0, (%rdi) */
+        o(0x100ff2); g(0x46); g(0x10); /* movsd 16(%rsi), %xmm0 */
+        o(0x110ff2); g(0x47); g(0x10); /* movsd %xmm0, 16(%rdi) */
     } else if (size == 32) {
         /* 256-bit SIMD (2x 128-bit SSE) move */
         o(0x100f); g(0x06); /* movups (%rsi), %xmm0 */
@@ -2953,7 +3981,7 @@ ST_FUNC void gen_struct_copy(int size)
         o(0xa548f3);
         vpop();
     }
-    if (size != 16 && size != 32 && size != 64) {
+    if (size != 4 && size != 8 && size != 16 && size != 24 && size != 32 && size != 64) {
         if (size & 0x04)
             o(0xa5);
         if (size & 0x02)

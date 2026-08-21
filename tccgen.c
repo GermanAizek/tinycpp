@@ -180,7 +180,6 @@ ST_FUNC void gsym(int t)
     gsym_addr(t, ind);
     CODE_ON();
   }
-  clear_local_reg_cache();
 }
 
 /* Clear 'nocode_wanted' if current pc is a label */
@@ -188,7 +187,6 @@ static int gind()
 {
   int t = ind;
   CODE_ON();
-  clear_local_reg_cache();
   if (debug_modes)
     tcc_tcov_block_begin(tcc_state);
   return t;
@@ -1501,22 +1499,7 @@ ST_FUNC int get_reg(int rc)
     int r;
     SValue *p;
 
-    /* first pass: find a free register that is not currently holding a cached local variable */
-    for(r=0;r<NB_REGS;r++) {
-        if ((reg_classes[r] & rc) && !is_reg_cached(r)) {
-            if (nocode_wanted)
-                return r;
-            for(p=vstack;p<=vtop;p++) {
-                if ((p->r & VT_VALMASK) == r ||
-                    p->r2 == r)
-                    goto notfound1;
-            }
-            return r;
-        }
-    notfound1: ;
-    }
-
-    /* second pass: find any free register */
+    /* find any free register */
     for(r=0;r<NB_REGS;r++) {
         if (reg_classes[r] & rc) {
             if (nocode_wanted)
@@ -1524,11 +1507,11 @@ ST_FUNC int get_reg(int rc)
             for(p=vstack;p<=vtop;p++) {
                 if ((p->r & VT_VALMASK) == r ||
                     p->r2 == r)
-                    goto notfound2;
+                    goto notfound;
             }
             return r;
         }
-    notfound2: ;
+    notfound: ;
     }
     
     /* no register left : free the first one on the stack (VERY
@@ -1549,6 +1532,8 @@ ST_FUNC int get_reg(int rc)
     /* Should never comes here */
     return -1;
 }
+
+
 
 /* find a free temporary local variable (return the offset on stack) match
    size and align. If none, add new temporary stack variable */
@@ -3172,26 +3157,6 @@ op_err:
                 gen_cast_s(VT_INT);
 #endif
             type1 = vtop[-1].type;
-#if defined(TCC_TARGET_X86_64)
-            if (tcc_state->optimize > 0 && op == '+' && !CONST_WANTED && !tcc_state->do_bounds_check) {
-                int psize = type_size(pointed_type(&vtop[-1].type), &align);
-                if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
-                    int c = (int)vtop->c.i * psize;
-                    vtop--;
-                    if (c != 0)
-                        gen_add_const(c);
-                    type1.t &= ~(VT_ARRAY|VT_VLA);
-                    vtop->type = type1;
-                    goto done_ptr_op;
-                } else if (psize == 1 || psize == 2 || psize == 4 || psize == 8) {
-                    gen_cast_s(VT_LLONG);
-                    gen_lea(psize);
-                    type1.t &= ~(VT_ARRAY|VT_VLA);
-                    vtop->type = type1;
-                    goto done_ptr_op;
-                }
-            }
-#endif
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
@@ -3213,7 +3178,6 @@ op_err:
             type1.t &= ~(VT_ARRAY|VT_VLA);
             /* put again type if gen_opic() swaped operands */
             vtop->type = type1;
-        done_ptr_op: ;
         }
     } else {
         /* floats can only be used for a few operations */
@@ -3925,6 +3889,7 @@ ST_FUNC void vstore(void)
 		sv.sym = NULL;
                 load(r, &sv);
                 vtop[-1].r = r | VT_LVAL;
+                vtop[-1].c.i = 0;
             }
 
             r = vtop->r & VT_VALMASK;
@@ -6579,10 +6544,7 @@ special_math_val:
         if (tok == TOK_INC || tok == TOK_DEC) {
             int t = tok;
             next();
-            if (tcc_state->optimize > 0 && (tok == ';' || tok == ')' || tok == ',' || tok == TOK_EOF))
-                inc(0, t);
-            else
-                inc(1, t);
+            inc(1, t);
         } else if (tok == '.' || tok == TOK_ARROW) {
             int qualifiers, cumofs;
             /* field */ 
@@ -6593,42 +6555,20 @@ special_math_val:
             /* expect pointer on structure */
             next();
             s = find_field(&vtop->type, tok, &cumofs);
-#ifdef CONFIG_TCC_BCHECK
-            if (tcc_state->optimize > 0 && !tcc_state->do_bounds_check) {
-#else
-            if (tcc_state->optimize > 0) {
-#endif
-                if (cumofs == 0) {
-                    vtop->type = s->type;
-                    if (qualifiers)
-                        parse_btype_qualify(&vtop->type, qualifiers);
-                    if (vtop->type.t & VT_ARRAY)
-                        vtop->r &= ~VT_LVAL;
-                    next();
-                    continue;
-                } else if ((vtop->r & VT_LVAL) && (vtop->r & (VT_VALMASK | VT_SYM)) == VT_LOCAL) {
-                    vtop->type = s->type;
-                    vtop->c.i += cumofs;
-                    if (qualifiers)
-                        parse_btype_qualify(&vtop->type, qualifiers);
-                    if (vtop->type.t & VT_ARRAY)
-                        vtop->r &= ~VT_LVAL;
-                    next();
-                    continue;
-                }
-            }
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
             if (cumofs != 0) {
                 vpushi(cumofs);
                 gen_op('+');
+            } else if (vtop->r & VT_LVAL) {
+                gv(RC_INT);
             }
             /* change type to field type, and set to lvalue */
             vtop->type = s->type;
             if (qualifiers)
                 parse_btype_qualify(&vtop->type, qualifiers);
-            /* an array is never an lvalue */
+            /* Arrays cannot be lvalues */
             if (!(vtop->type.t & VT_ARRAY)) {
                 vtop->r |= VT_LVAL;
 #ifdef CONFIG_TCC_BCHECK
@@ -7857,9 +7797,6 @@ again:
                 end_macro();
             }
 
-            if (init_jmp)
-                gsym(init_jmp);
-
             if (has_cond) {
                 begin_macro(cond_str, 1);
                 next();
@@ -7869,6 +7806,22 @@ again:
                 end_macro();
             } else {
                 gjmp_addr(body_lbl);
+            }
+
+            if (init_jmp) {
+                int exit_jmp = gjmp(0);
+                gsym(init_jmp);
+                if (has_cond) {
+                    begin_macro(cond_str, 1);
+                    next();
+                    gexpr();
+                    c = gvtst(0, 0);
+                    gsym_addr(c, body_lbl);
+                    end_macro();
+                } else {
+                    gjmp_addr(body_lbl);
+                }
+                gsym(exit_jmp);
             }
 
             tok = saved_tok;

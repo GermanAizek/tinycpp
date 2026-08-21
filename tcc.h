@@ -1648,15 +1648,8 @@ ST_FUNC void gen_opf(int op);
 ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);
-ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs);
-ST_FUNC void gen_lea(int scale);
-ST_FUNC void gen_add_const(int c);
 #if defined(TCC_TARGET_X86_64)
-ST_FUNC int is_reg_cached(int r);
-ST_FUNC void clear_local_reg_cache(void);
-#else
-#define is_reg_cached(r) (0)
-#define clear_local_reg_cache() ((void)0)
+ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs);
 #endif
 ST_FUNC void ggoto(void);
 #ifndef TCC_TARGET_C67

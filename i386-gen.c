@@ -336,6 +336,7 @@ ST_FUNC void load(int r, SValue *sv)
             if (!(reg_classes[fr] & RC_INT))
                 fr = get_reg(RC_INT);
             load(fr, &v1);
+            fc = 0;
         }
         if ((ft & VT_BTYPE) == VT_FLOAT) {
             opc = 0xd9; /* flds */
