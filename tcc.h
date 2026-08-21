@@ -1650,6 +1650,8 @@ ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);
 #if defined(TCC_TARGET_X86_64)
 ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs);
+ST_FUNC void gen_inline_hash_fn(void);
+ST_FUNC void gen_inline_min3(void);
 #endif
 ST_FUNC void ggoto(void);
 #ifndef TCC_TARGET_C67

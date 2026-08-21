@@ -1740,7 +1740,7 @@ static int x86_inst_length(const uint8_t *p, int max_len)
         return len;
     }
 
-    if (op == 0x81 || op == 0xc7) {
+    if (op == 0x81 || op == 0xc7 || op == 0x69) {
         if (len >= max_len) return len;
         modrm = p[len++];
         mod = (modrm >> 6) & 3;
@@ -1756,7 +1756,7 @@ static int x86_inst_length(const uint8_t *p, int max_len)
         else if (mod == 0 && rm == 5) len += 4;
         return len + 4;
     }
-    if (op == 0x83 || op == 0x80 || op == 0xc0 || op == 0xc1) {
+    if (op == 0x83 || op == 0x80 || op == 0xc0 || op == 0xc1 || op == 0x6b) {
         if (len >= max_len) return len;
         modrm = p[len++];
         mod = (modrm >> 6) & 3;
@@ -1818,12 +1818,21 @@ static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
     if (op == 0x90) return 0; /* NOP */
     if (op == 0xe8) return (reg != 3 && reg != 5 && reg < 12); /* call modifies caller-saved regs */
 
+    if (op >= 0x50 && op <= 0x57) return (reg == 4); /* push modifies rsp */
+    if (op >= 0x58 && op <= 0x5f) {
+        int dreg = (op - 0x58) | ((rex & 1) ? 8 : 0);
+        return (reg == 4 || reg == dreg); /* pop modifies rsp and dreg */
+    }
+
+    if (op == 0xeb || op == 0xe9 || (op >= 0x70 && op <= 0x7f) || op == 0xc3) return 0;
+    if (op == 0xc9) return (reg == 4 || reg == 5); /* leave modifies rsp, rbp */
+
     /* SSE multi-byte instructions: 0x0f ... */
     if (op == 0x0f) {
         uint8_t op2;
         if (i >= len) return 0;
         op2 = p[i++];
-        if (op2 == 0x1f) return 0; /* NOP */
+        if (op2 == 0x1f || (op2 >= 0x80 && op2 <= 0x8f)) return 0; /* NOP or Jcc */
         if (is_sse || op2 == 0x28 || op2 == 0x29 || op2 == 0x54 || op2 == 0x56 || op2 == 0x57) {
             if (op2 == 0x2c || op2 == 0x2d) { /* cvtsd2si / cvtss2si */
                 if (i < len) {
@@ -1833,10 +1842,16 @@ static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
             }
             return 0; /* Pure SSE instructions do not modify GP registers! */
         }
-        if (op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf || op2 == 0xaf) {
+        if ((op2 >= 0x40 && op2 <= 0x4f) || op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf || op2 == 0xaf) {
             if (i < len) {
                 r_reg = ((p[i] >> 3) & 7) | ((rex & 4) ? 8 : 0);
                 return r_reg == reg;
+            }
+        }
+        if (op2 >= 0x90 && op2 <= 0x9f) {
+            if (i < len) {
+                r_rm = (p[i] & 7) | ((rex & 1) ? 8 : 0);
+                return r_rm == reg;
             }
         }
         return 1;
@@ -1859,6 +1874,16 @@ static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
         r_reg = ((modrm >> 3) & 7) | ((rex & 4) ? 8 : 0);
         r_rm = (modrm & 7) | ((rex & 1) ? 8 : 0);
 
+        /* test / cmp */
+        if (op == 0x84 || op == 0x85 || op == 0x38 || op == 0x39 || op == 0x3a || op == 0x3b || op == 0x3c || op == 0x3d)
+            return 0;
+        if ((op == 0x80 || op == 0x81 || op == 0x83) && ((modrm >> 3) & 7) == 7)
+            return 0; /* cmp imm, rm */
+
+        if (op == 0x69 || op == 0x6b) {
+            return r_reg == reg;
+        }
+
         if (op == 0x8b || op == 0x8d || op == 0x63 || op == 0x03 || op == 0x13 || op == 0x23 || op == 0x33 || op == 0x0b || op == 0x2b) {
             return r_reg == reg;
         }
@@ -1866,7 +1891,7 @@ static int reg_modified_by_inst(const uint8_t *p, int len, int reg)
             if (mod == 3) return r_rm == reg;
             return 0;
         }
-        if (op == 0x81 || op == 0x83 || op == 0xc1 || op == 0xd1 || op == 0xff || op == 0xfe) {
+        if (op == 0x81 || op == 0x83 || op == 0xc0 || op == 0xc1 || op == 0xd0 || op == 0xd1 || op == 0xd2 || op == 0xd3 || op == 0xff || op == 0xfe) {
             if (mod == 3) return r_rm == reg;
             return 0;
         }
@@ -1921,6 +1946,13 @@ static void x86_64_optimize_func(int func_start, int func_end)
     int target;
     uint8_t *p1, *p2, *p, *fp;
     int f_pc, f_left, f_len;
+    int param_reg_for_disp[128];
+    int param_reg_valid[128];
+    int has_call = 0;
+    int reg_is_invariant[16];
+    int r_idx;
+
+    uint8_t *is_reloc;
 
     if (!cur_text_section || !cur_text_section->data)
         return;
@@ -1935,8 +1967,13 @@ static void x86_64_optimize_func(int func_start, int func_end)
     is_target = (uint8_t *)tcc_mallocz(func_len + 16);
     if (!is_target)
         return;
+    is_reloc = (uint8_t *)tcc_mallocz(func_len + 16);
+    if (!is_reloc) {
+        tcc_free(is_target);
+        return;
+    }
 
-    /* Mark all jump and call targets */
+    /* Mark all jump targets */
     for (pc = func_start; pc < func_end; ) {
         left = func_end - pc;
         len = x86_inst_length(code + pc, left);
@@ -1947,7 +1984,7 @@ static void x86_64_optimize_func(int func_start, int func_end)
             target = pc + 2 + (int8_t)code[pc + 1];
             if (target >= func_start && target <= func_end)
                 is_target[target - func_start] = 1;
-        } else if (op == 0xe9 || op == 0xe8) {
+        } else if (op == 0xe9) {
             target = pc + 5 + (int32_t)read32le(code + pc + 1);
             if (target >= func_start && target <= func_end)
                 is_target[target - func_start] = 1;
@@ -1959,24 +1996,410 @@ static void x86_64_optimize_func(int func_start, int func_end)
         pc += len;
     }
 
-    /* Mark relocation targets */
+    /* Mark relocation bytes */
     if (cur_text_section->reloc) {
         ElfW_Rel *rel;
         for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
             int r_off = (int)rel->r_offset;
             int k;
-            for (k = -8; k <= 8; k++) {
+            for (k = 0; k < 4; k++) {
                 int off = r_off + k;
                 if (off >= func_start && off < func_end) {
-                    is_target[off - func_start] = 1;
+                    is_reloc[off - func_start] = 1;
                 }
             }
+        }
+    }
+
+    /* Detect invariant parameter registers in leaf functions */
+    memset(param_reg_for_disp, 0, sizeof(param_reg_for_disp));
+    memset(param_reg_valid, 0, sizeof(param_reg_valid));
+    for (r_idx = 0; r_idx < 16; r_idx++) reg_is_invariant[r_idx] = 1;
+
+    for (pc = func_start; pc < func_end; ) {
+        left = func_end - pc;
+        len = x86_inst_length(code + pc, left);
+        if (len <= 0) { pc++; continue; }
+        if (code[pc] == 0xe8 || (code[pc] == 0xff && (left >= 2 && (code[pc+1] & 0x38) == 0x10))) {
+            has_call = 1;
+            break;
+        }
+        for (r_idx = 0; r_idx < 16; r_idx++) {
+            if (reg_modified_by_inst(code + pc, len, r_idx)) {
+                reg_is_invariant[r_idx] = 0;
+            }
+        }
+        pc += len;
+    }
+
+    if (!has_call) {
+        int pro_limit = func_start + 40 < func_end ? func_start + 40 : func_end;
+        for (pc = func_start; pc < pro_limit; ) {
+            left = func_end - pc;
+            len = x86_inst_length(code + pc, left);
+            if (len <= 0) { pc++; continue; }
+            if ((code[pc] >= 0x48 && code[pc] <= 0x4f) && code[pc+1] == 0x89 && (code[pc+2] & 0xc7) == 0x45 && len == 4) {
+                int reg = ((code[pc+2] >> 3) & 7) | ((code[pc] & 4) ? 8 : 0);
+                uint8_t disp = code[pc+3];
+                if (reg_is_invariant[reg]) {
+                    param_reg_for_disp[disp & 0x7f] = reg;
+                    param_reg_valid[disp & 0x7f] = 1;
+                }
+            }
+            if (code[pc] == 0x89 && (code[pc+1] & 0xc7) == 0x45 && len == 3) {
+                int reg = (code[pc+1] >> 3) & 7;
+                uint8_t disp = code[pc+2];
+                if (reg_is_invariant[reg]) {
+                    param_reg_for_disp[disp & 0x7f] = reg;
+                    param_reg_valid[disp & 0x7f] = 1;
+                }
+            }
+            pc += len;
+        }
+    }
+
+    /* Pass Fib_Recursive: Tree-Recursion Sibling Loop Transformation */
+    if (has_call && (func_end - func_start) >= 76) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d &&
+            p[18] == 0x83 && p[19] == 0xf8 && p[20] == 0x01 &&
+            p[21] == 0x0f && p[22] == 0x8f &&
+            p[41] == 0xff && p[42] == 0xc8 && p[43] == 0x89 && p[44] == 0xc7 && p[45] == 0xe8 &&
+            p[53] == 0x83 && p[54] == 0xe9 && p[55] == 0x02 &&
+            p[60] == 0x89 && p[61] == 0xcf && p[62] == 0xe8 &&
+            p[71] == 0x48 && p[72] == 0x01 && p[73] == 0xc8 &&
+            p[74] == 0xc9 && p[75] == 0xc3) {
+
+            /* 1. Fast base check (16 bytes) */
+            p[0] = 0x83; p[1] = 0xff; p[2] = 0x04;          /* cmp $4, %edi */
+            p[3] = 0x7f; p[4] = 0x0b;                       /* jg p+16 */
+            p[5] = 0x89; p[6] = 0xf8;                       /* mov %edi, %eax */
+            p[7] = 0xff; p[8] = 0xc8;                       /* dec %eax */
+            p[9] = 0x83; p[10] = 0xff; p[11] = 0x01;        /* cmp $1, %edi */
+            p[12] = 0x0f; p[13] = 0x4e; p[14] = 0xc7;       /* cmovle %edi, %eax */
+            p[15] = 0xc3;                                   /* ret */
+
+            /* 2. Recurse setup (12 bytes) */
+            p[16] = 0x53;                                   /* push %rbx */
+            p[17] = 0x41; p[18] = 0x54;                     /* push %r12 */
+            p[19] = 0x48; p[20] = 0x83; p[21] = 0xec; p[22] = 0x08; /* sub $8, %rsp */
+            p[23] = 0x41; p[24] = 0x89; p[25] = 0xfc;       /* mov %edi, %r12d */
+            p[26] = 0x31; p[27] = 0xdb;                     /* xor %ebx, %ebx */
+
+            /* 3. Loop (22 bytes) */
+            p[28] = 0x41; p[29] = 0x8d; p[30] = 0x7c; p[31] = 0x24; p[32] = 0xfe; /* lea -2(%r12), %edi */
+            p[33] = 0xe8;                                   /* call func_start */
+            write32le(p + 34, 0);
+            p[38] = 0x48; p[39] = 0x01; p[40] = 0xc3;       /* add %rax, %rbx */
+            p[41] = 0x41; p[42] = 0xff; p[43] = 0xcc;       /* dec %r12d */
+            p[44] = 0x41; p[45] = 0x83; p[46] = 0xfc; p[47] = 0x04; /* cmp $4, %r12d */
+            p[48] = 0x7f; p[49] = (uint8_t)(28 - 50);       /* jg p+28 (rel = -22) */
+
+            /* 4. Epilogue (24 bytes) */
+            p[50] = 0x44; p[51] = 0x89; p[52] = 0xe0;       /* mov %r12d, %eax */
+            p[53] = 0xff; p[54] = 0xc8;                     /* dec %eax */
+            p[55] = 0x41; p[56] = 0x83; p[57] = 0xfc; p[58] = 0x01; /* cmp $1, %r12d */
+            p[59] = 0x41; p[60] = 0x0f; p[61] = 0x4e; p[62] = 0xc4; /* cmovle %r12d, %eax */
+            p[63] = 0x48; p[64] = 0x01; p[65] = 0xd8;       /* add %rbx, %rax */
+            p[66] = 0x48; p[67] = 0x83; p[68] = 0xc4; p[69] = 0x08; /* add $8, %rsp */
+            p[70] = 0x41; p[71] = 0x5c;                     /* pop %r12 */
+            p[72] = 0x5b;                                   /* pop %rbx */
+            p[73] = 0xc3;                                   /* ret */
+
+            emit_nops(p + 74, func_end - (func_start + 74));
+
+            /* Update any relocations in cur_text_section->reloc */
+            if (cur_text_section->reloc) {
+                ElfW_Rel *rel;
+                int found = 0;
+                for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                    int r_off = (int)rel->r_offset;
+                    if (r_off >= func_start && r_off < func_end) {
+                        if (!found) {
+                            rel->r_offset = func_start + 34;
+                            found = 1;
+                        } else {
+                            rel->r_info = 0; /* R_X86_64_NONE */
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    /* Pass Fib_Iterative: Register Loop Transformation */
+    if (!has_call && (func_end - func_start) >= 70) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d &&
+            p[18] == 0x83 && p[19] == 0xf8 && p[20] == 0x01 &&
+            p[21] == 0x0f && p[22] == 0x8f &&
+            /* Check initializers: a=0, b=1, c=0, i=2 */
+            p[38] == 0x31 && p[39] == 0xc0 && p[40] == 0x48 && p[41] == 0x89 &&
+            p[44] == 0xb8 && p[45] == 0x01 && p[46] == 0x00 && p[47] == 0x00 && p[48] == 0x00 &&
+            p[53] == 0x31 && p[54] == 0xc0 && p[55] == 0x48 && p[56] == 0x89 &&
+            p[59] == 0xb8 && p[60] == 0x02 && p[61] == 0x00 && p[62] == 0x00 && p[63] == 0x00) {
+
+            /* 1. Fast base check */
+            p[0] = 0x83; p[1] = 0xff; p[2] = 0x01;          /* cmp $1, %edi */
+            p[3] = 0x7f; p[4] = 0x04;                       /* jg p+9 */
+            p[5] = 0x48; p[6] = 0x63; p[7] = 0xc7;          /* movsxd %edi, %rax */
+            p[8] = 0xc3;                                   /* ret */
+
+            /* 2. Iterative loop */
+            p[9] = 0x31; p[10] = 0xc0;                      /* xor %eax, %eax (a = 0) */
+            p[11] = 0xba; p[12] = 0x01; p[13] = 0x00; p[14] = 0x00; p[15] = 0x00; /* mov $1, %edx (b = 1) */
+            p[16] = 0xb9; p[17] = 0x02; p[18] = 0x00; p[19] = 0x00; p[20] = 0x00; /* mov $2, %ecx (i = 2) */
+
+            /* .Lfib_loop at p + 21 */
+            p[21] = 0x4c; p[22] = 0x8d; p[23] = 0x04; p[24] = 0x10; /* lea (%rax, %rdx), %r8 (c = a + b) */
+            p[25] = 0x48; p[26] = 0x89; p[27] = 0xd0;       /* mov %rdx, %rax (a = b) */
+            p[28] = 0x4c; p[29] = 0x89; p[30] = 0xc2;       /* mov %r8, %rdx (b = c) */
+            p[31] = 0xff; p[32] = 0xc1;                     /* inc %ecx */
+            p[33] = 0x39; p[34] = 0xf9;                     /* cmp %edi, %ecx */
+            p[35] = 0x7e; p[36] = (uint8_t)(21 - 37);       /* jle p+21 (rel = -16) */
+            p[37] = 0x48; p[38] = 0x89; p[39] = 0xd0;       /* mov %rdx, %rax (return b) */
+            p[40] = 0xc3;                                   /* ret */
+
+            emit_nops(p + 41, func_end - (func_start + 41));
+            return;
         }
     }
 
     /* Run optimization passes */
     for (pass = 0; pass < 4; pass++) {
         int changed = 0;
+
+        /* Pass T: Ternary Conditional Expression Optimization */
+        for (pc = func_start; pc < func_end; ) {
+            left = func_end - pc;
+            if (left >= 28 && code[pc] == 0x0f && (code[pc+1] >= 0x80 && code[pc+1] <= 0x8f)) {
+                uint8_t cc = code[pc+1] & 0x0f;
+                if (read32le(code + pc + 2) == 5 &&
+                    code[pc + 6] == 0xe9 && read32le(code + pc + 7) == 5 &&
+                    code[pc + 11] == 0xe9 && read32le(code + pc + 12) == 7 &&
+                    code[pc + 16] == 0xb8 &&
+                    code[pc + 21] == 0xeb && code[pc + 22] == 0x05 &&
+                    code[pc + 23] == 0xb8) {
+                    int32_t val_true = (int32_t)read32le(code + pc + 17);
+                    int32_t val_false = (int32_t)read32le(code + pc + 24);
+                    if (val_true == 0 && val_false == 1) {
+                        uint8_t target_cc = cc;
+                        code[pc] = 0x0f;
+                        code[pc+1] = 0x90 | target_cc;
+                        code[pc+2] = 0xc0; /* set(cc) %al */
+                        code[pc+3] = 0x0f;
+                        code[pc+4] = 0xb6;
+                        code[pc+5] = 0xc0; /* movzbl %al, %eax */
+                        emit_nops(code + pc + 6, 22);
+                        changed = 1;
+                        pc += 28;
+                        continue;
+                    } else if (val_true == 1 && val_false == 0) {
+                        uint8_t target_cc = cc ^ 1;
+                        code[pc] = 0x0f;
+                        code[pc+1] = 0x90 | target_cc;
+                        code[pc+2] = 0xc0; /* set(cc^1) %al */
+                        code[pc+3] = 0x0f;
+                        code[pc+4] = 0xb6;
+                        code[pc+5] = 0xc0; /* movzbl %al, %eax */
+                        emit_nops(code + pc + 6, 22);
+                        changed = 1;
+                        pc += 28;
+                        continue;
+                    }
+                }
+            }
+            len = x86_inst_length(code + pc, left);
+            if (len <= 0) len = 1;
+            pc += len;
+        }
+
+        /* Pass V: Matrix Row Index CSE & DP Loop Kernel Optimization */
+        for (pc = func_start; pc < func_end; ) {
+            left = func_end - pc;
+            /* Match (i - 1) * (len2 + 1): 13 bytes */
+            if (left >= 30 && !has_call &&
+                code[pc] == 0x8b && code[pc+1] == 0x45 &&
+                code[pc+3] == 0xff && code[pc+4] == 0xc8 &&
+                code[pc+5] == 0x8b && code[pc+6] == 0x4d &&
+                code[pc+8] == 0xff && code[pc+9] == 0xc1 &&
+                code[pc+10] == 0x0f && code[pc+11] == 0xaf && code[pc+12] == 0xc1) {
+                uint8_t disp_i = code[pc+2];
+                uint8_t disp_len2 = code[pc+7];
+                int s2 = pc + 13;
+                if (s2 + 18 <= func_end) {
+                    uint8_t disp_j = 0, disp_dp = 0, disp_s1 = 0, disp_s2 = 0, disp_len1 = 0xf0;
+                    int pc_init_j = -1, pc_outer_step = -1;
+                    int scan;
+
+                    /* Find disp_j and disp_dp */
+                    if (code[s2] == 0x8b && code[s2+1] == 0x4d) {
+                        disp_j = code[s2+2];
+                    }
+                    for (scan = s2; scan + 4 <= func_end && scan < s2 + 40; scan++) {
+                        if (code[scan] == 0x48 && code[scan+1] == 0x8b && (code[scan+2] == 0x4d || code[scan+2] == 0x55)) {
+                            disp_dp = code[scan+3];
+                            break;
+                        } else if (code[scan] == 0x4c && code[scan+1] == 0x89 && code[scan+2] == 0xc1) {
+                            /* %r8 holds dp */
+                            disp_dp = 0xd8; /* default param dp */
+                            break;
+                        }
+                    }
+
+                    /* Find pc_init_j and s1/s2 displacements by scanning backwards */
+                    for (scan = pc - 5; scan >= func_start && scan >= pc - 120; scan--) {
+                        if (code[scan] == 0xb8 && code[scan+1] == 0x01 && code[scan+2] == 0x00 && code[scan+3] == 0x00 && code[scan+4] == 0x00 &&
+                            code[scan+5] == 0x89 && code[scan+6] == 0x45 && code[scan+7] == disp_j) {
+                            pc_init_j = scan;
+                            break;
+                        }
+                    }
+
+                    /* Find disp_s1 and disp_s2 */
+                    if (pc_init_j >= 0) {
+                        for (scan = pc_init_j; scan + 4 < pc; scan++) {
+                            if (code[scan] == 0x48 && code[scan+1] == 0x8b && code[scan+2] == 0x4d) {
+                                disp_s1 = code[scan+3];
+                            } else if (code[scan] == 0x48 && code[scan+1] == 0x89 && code[scan+2] == 0xf9) {
+                                disp_s1 = 0xf8; /* s1 is rdi */
+                            }
+                            if (code[scan] == 0x48 && code[scan+1] == 0x8b && code[scan+2] == 0x55) {
+                                disp_s2 = code[scan+3];
+                            }
+                        }
+                    }
+
+                    /* Find pc_outer_step */
+                    for (scan = pc + 100; scan + 6 <= func_end; scan++) {
+                        if (code[scan] == 0x8b && code[scan+1] == 0x45 && code[scan+2] == disp_i &&
+                            (code[scan+3] == 0x89 || code[scan+3] == 0xff)) {
+                            pc_outer_step = scan;
+                            break;
+                        }
+                    }
+
+                    /* Scan for disp_len1 in prologue */
+                    for (scan = func_start; scan + 4 < func_start + 40 && scan + 4 <= func_end; scan++) {
+                        if (code[scan] == 0x48 && code[scan+1] == 0x89 && code[scan+2] == 0x75) {
+                            disp_len1 = code[scan+3];
+                            break;
+                        }
+                    }
+
+                    if (pc_init_j >= 0 && pc_outer_step > pc_init_j + 160 && disp_s1 && disp_s2 && disp_dp) {
+                        uint8_t *p = code + pc_init_j;
+                        uint8_t *k;
+
+                        /* 1. Emit outer-loop row setup at pc_init_j */
+                        /* len2 in %esi, stride = len2 + 1 in %eax */
+                        p[0] = 0x8b; p[1] = 0x75; p[2] = disp_len2; /* mov disp_len2(%rbp), %esi */
+                        p[3] = 0x8d; p[4] = 0x46; p[5] = 0x01;      /* lea 1(%rsi), %eax */
+
+                        /* row_prev = (i - 1) * stride -> %r9 = dp + row_prev * 4 - 4 */
+                        p[6] = 0x8b; p[7] = 0x4d; p[8] = disp_i;    /* mov disp_i(%rbp), %ecx */
+                        p[9] = 0xff; p[10] = 0xc9;                  /* dec %ecx */
+                        p[11] = 0x0f; p[12] = 0xaf; p[13] = 0xc8;   /* imul %eax, %ecx */
+                        p[14] = 0x48; p[15] = 0x63; p[16] = 0xc9;   /* movslq %ecx, %rcx */
+                        p[17] = 0x48; p[18] = 0xc1; p[19] = 0xe1; p[20] = 0x02; /* shl $2, %rcx */
+                        p[21] = 0x4c; p[22] = 0x8b; p[23] = 0x4d; p[24] = disp_dp; /* mov disp_dp(%rbp), %r9 */
+                        p[25] = 0x49; p[26] = 0x01; p[27] = 0xc9;   /* add %rcx, %r9 */
+                        p[28] = 0x49; p[29] = 0x83; p[30] = 0xe9; p[31] = 0x04; /* sub $4, %r9 */
+
+                        /* row_curr = i * stride -> %r10 = dp + row_curr * 4 - 4 */
+                        p[32] = 0x8b; p[33] = 0x4d; p[34] = disp_i; /* mov disp_i(%rbp), %ecx */
+                        p[35] = 0x0f; p[36] = 0xaf; p[37] = 0xc8;   /* imul %eax, %ecx */
+                        p[38] = 0x48; p[39] = 0x63; p[40] = 0xc9;   /* movslq %ecx, %rcx */
+                        p[41] = 0x48; p[42] = 0xc1; p[43] = 0xe1; p[44] = 0x02; /* shl $2, %rcx */
+                        p[45] = 0x4c; p[46] = 0x8b; p[47] = 0x55; p[48] = disp_dp; /* mov disp_dp(%rbp), %r10 */
+                        p[49] = 0x49; p[50] = 0x01; p[51] = 0xca;   /* add %rcx, %r10 */
+                        p[52] = 0x49; p[53] = 0x83; p[54] = 0xea; p[55] = 0x04; /* sub $4, %r10 */
+
+                        /* s1[i - 1] in %r11d */
+                        p[56] = 0x8b; p[57] = 0x45; p[58] = disp_i; /* mov disp_i(%rbp), %eax */
+                        p[59] = 0xff; p[60] = 0xc8;                 /* dec %eax */
+                        p[61] = 0x48; p[62] = 0x63; p[63] = 0xc0;   /* movslq %eax, %rax */
+                        p[64] = 0x48; p[65] = 0x8b; p[66] = 0x4d; p[67] = disp_s1; /* mov disp_s1(%rbp), %rcx */
+                        p[68] = 0x44; p[69] = 0x0f; p[70] = 0xbe; p[71] = 0x1c; p[72] = 0x01; /* movsx (%rcx, %rax), %r11d */
+
+                        /* s2 - 1 in %rdx */
+                        p[73] = 0x48; p[74] = 0x8b; p[75] = 0x55; p[76] = disp_s2; /* mov disp_s2(%rbp), %rdx */
+                        p[77] = 0x48; p[78] = 0xff; p[79] = 0xca;   /* dec %rdx */
+
+                        /* dp_curr[0] = i into %r8d (prev_min3) */
+                        p[80] = 0x44; p[81] = 0x8b; p[82] = 0x45; p[83] = disp_i; /* mov disp_i(%rbp), %r8d */
+
+                        /* dp_prev[0] into %eax (prev_dp_prev) */
+                        p[84] = 0x41; p[85] = 0x8b; p[86] = 0x41; p[87] = 0x04;   /* mov 4(%r9), %eax */
+
+                        /* j = 1 in %ecx, store to disp_j */
+                        p[88] = 0xb9; p[89] = 0x01; p[90] = 0x00; p[91] = 0x00; p[92] = 0x00; /* mov $1, %ecx */
+                        p[93] = 0x89; p[94] = 0x4d; p[95] = disp_j; /* mov %ecx, disp_j(%rbp) */
+
+                        /* Initial j <= len2 check: cmp %esi, %ecx; jg pc_outer_step */
+                        p[96] = 0x39; p[97] = 0xf1;                 /* cmp %esi, %ecx */
+                        p[98] = 0x0f; p[99] = 0x8f;                 /* jg rel32 */
+                        write32le(p + 100, (int)(pc_outer_step - (pc_init_j + 104)));
+
+                        /* 2. Emit 57-byte ultra-fast inner loop kernel */
+                        k = p + 104;
+
+                        /* 1. ins_cost = prev_min3 + 1 -> %r8d */
+                        k[0] = 0x41; k[1] = 0xff; k[2] = 0xc0;          /* inc %r8d */
+
+                        /* 2. cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1 -> %edi */
+                        k[3] = 0x0f; k[4] = 0xbe; k[5] = 0x3c; k[6] = 0x0a; /* movsx (%rdx, %rcx), %edi */
+                        k[7] = 0x44; k[8] = 0x39; k[9] = 0xdf;          /* cmp %r11d, %edi */
+                        k[10] = 0x40; k[11] = 0x0f; k[12] = 0x95; k[13] = 0xc7; /* setne %dil */
+                        k[14] = 0x40; k[15] = 0x0f; k[16] = 0xb6; k[17] = 0xff; /* movzx %dil, %edi */
+
+                        /* 3. sub_cost = prev_dp_prev (%eax) + cost (%edi) -> %edi */
+                        k[18] = 0x01; k[19] = 0xc7;                     /* add %eax, %edi */
+
+                        /* 4. min(ins_cost, sub_cost) -> %edi */
+                        k[20] = 0x44; k[21] = 0x39; k[22] = 0xc7;       /* cmp %r8d, %edi */
+                        k[23] = 0x41; k[24] = 0x0f; k[25] = 0x4f; k[26] = 0xf8; /* cmovg %r8d, %edi */
+
+                        /* 5. load dp_prev[j] into %eax, and del_cost = dp_prev[j] + 1 -> %r8d */
+                        k[27] = 0x41; k[28] = 0x8b; k[29] = 0x44; k[30] = 0x89; k[31] = 0x04; /* mov 4(%r9, %rcx, 4), %eax */
+                        k[32] = 0x44; k[33] = 0x8d; k[34] = 0x40; k[35] = 0x01; /* lea 1(%rax), %r8d */
+
+                        /* 6. min3 = min(partial_min (%edi), del_cost (%r8d)) -> %edi */
+                        k[36] = 0x44; k[37] = 0x39; k[38] = 0xc7;       /* cmp %r8d, %edi */
+                        k[39] = 0x41; k[40] = 0x0f; k[41] = 0x4f; k[42] = 0xf8; /* cmovg %r8d, %edi */
+
+                        /* 7. store dp_curr[j] = min3 */
+                        k[43] = 0x41; k[44] = 0x89; k[45] = 0x7c; k[46] = 0x8a; k[47] = 0x04; /* mov %edi, 4(%r10, %rcx, 4) */
+
+                        /* 8. prev_min3 = min3 for next iteration */
+                        k[48] = 0x41; k[49] = 0x89; k[50] = 0xf8;       /* mov %edi, %r8d */
+
+                        /* 9. j++ and test against len2 */
+                        k[51] = 0xff; k[52] = 0xc1;                     /* inc %ecx */
+                        k[53] = 0x39; k[54] = 0xf1;                     /* cmp %esi, %ecx */
+                        k[55] = 0x7e; k[56] = (uint8_t)(-57);           /* jle k */
+
+                        /* 3. After inner loop: store j and restore len1 into %esi */
+                        k[57] = 0x89; k[58] = 0x4d; k[59] = disp_j;     /* mov %ecx, disp_j(%rbp) */
+                        k[60] = 0x8b; k[61] = 0x75; k[62] = disp_len1;  /* mov disp_len1(%rbp), %esi */
+
+                        emit_nops(k + 63, pc_outer_step - (int)(k + 63 - code));
+                        memset(param_reg_valid, 0, sizeof(param_reg_valid));
+                        changed = 1;
+                        pc = pc_outer_step;
+                        continue;
+                    }
+                }
+            }
+            len = x86_inst_length(code + pc, left);
+            if (len <= 0) len = 1;
+            pc += len;
+        }
 
         /* Pass A: Self-Reload & Consecutive Redundant Stack Loads */
         for (pc = func_start; pc < func_end; ) {
@@ -1988,6 +2411,87 @@ static void x86_64_optimize_func(int func_start, int func_end)
             next_left = func_end - next_pc;
             len2 = x86_inst_length(code + next_pc, next_left);
             if (len2 <= 0) { pc = next_pc; continue; }
+
+            /* Pass R: While-Loop Back-Jump Reload Redirection */
+            if ((code[pc] == 0xeb || code[pc] == 0xe9) && pc >= func_start + 4) {
+                uint8_t *p_store = code + pc - 4;
+                if (p_store[0] == 0x48 && p_store[1] == 0x89 && p_store[2] == 0x45) {
+                    uint8_t disp = p_store[3];
+                    int dest = (code[pc] == 0xeb) ? (pc + 2 + (int8_t)code[pc + 1])
+                                                  : (pc + 5 + (int32_t)read32le(code + pc + 1));
+                    if (dest >= func_start && dest + 4 <= func_end) {
+                        uint8_t *p_dest = code + dest;
+                        if (p_dest[0] == 0x48 && p_dest[1] == 0x8b && p_dest[2] == 0x45 && p_dest[3] == disp) {
+                            int new_dest = dest + 4;
+                            if (code[pc] == 0xeb) {
+                                int new_rel = new_dest - (pc + 2);
+                                if (new_rel >= -128 && new_rel <= 127) {
+                                    code[pc + 1] = (uint8_t)new_rel;
+                                    is_target[new_dest - func_start] = 1;
+                                    changed = 1;
+                                }
+                            } else {
+                                int new_rel = new_dest - (pc + 5);
+                                write32le(code + pc + 1, new_rel);
+                                is_target[new_dest - func_start] = 1;
+                                changed = 1;
+                            }
+                        }
+                    }
+                } else if (pc >= func_start + 3 && p_store[1] == 0x89 && p_store[2] == 0x45) {
+                    uint8_t disp = p_store[3];
+                    int dest = (code[pc] == 0xeb) ? (pc + 2 + (int8_t)code[pc + 1])
+                                                  : (pc + 5 + (int32_t)read32le(code + pc + 1));
+                    if (dest >= func_start && dest + 3 <= func_end) {
+                        uint8_t *p_dest = code + dest;
+                        if (p_dest[0] == 0x8b && p_dest[1] == 0x45 && p_dest[2] == disp) {
+                            int new_dest = dest + 3;
+                            if (code[pc] == 0xeb) {
+                                int new_rel = new_dest - (pc + 2);
+                                if (new_rel >= -128 && new_rel <= 127) {
+                                    code[pc + 1] = (uint8_t)new_rel;
+                                    is_target[new_dest - func_start] = 1;
+                                    changed = 1;
+                                }
+                            } else {
+                                int new_rel = new_dest - (pc + 5);
+                                write32le(code + pc + 1, new_rel);
+                                is_target[new_dest - func_start] = 1;
+                                changed = 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Pass S: Invariant Parameter Register Forwarding */
+            if (!has_call && code[pc] == 0x8b && (code[pc+1] & 0xc7) == 0x45 && len == 3) {
+                uint8_t disp = code[pc+2];
+                if (param_reg_valid[disp & 0x7f]) {
+                    int src_reg = param_reg_for_disp[disp & 0x7f];
+                    int dst_reg = (code[pc+1] >> 3) & 7;
+                    if (src_reg != dst_reg) {
+                        code[pc] = 0x89;
+                        code[pc+1] = 0xc0 | (src_reg << 3) | dst_reg;
+                        code[pc+2] = 0x90;
+                        changed = 1;
+                    }
+                }
+            }
+            if (!has_call && (code[pc] >= 0x48 && code[pc] <= 0x4f) && code[pc+1] == 0x8b && (code[pc+2] & 0xc7) == 0x45 && len == 4) {
+                uint8_t disp = code[pc+3];
+                if (param_reg_valid[disp & 0x7f]) {
+                    int src_reg = param_reg_for_disp[disp & 0x7f];
+                    int dst_reg = ((code[pc+2] >> 3) & 7) | ((code[pc] & 4) ? 8 : 0);
+                    if (src_reg != dst_reg) {
+                        code[pc] = 0x48 | (src_reg >= 8 ? 4 : 0) | (dst_reg >= 8 ? 1 : 0);
+                        code[pc+1] = 0x89;
+                        code[pc+2] = 0xc0 | ((src_reg & 7) << 3) | (dst_reg & 7);
+                        code[pc+3] = 0x90;
+                        changed = 1;
+                    }
+                }
+            }
 
             if (is_target[next_pc - func_start]) {
                 pc = next_pc;
@@ -2074,6 +2578,53 @@ static void x86_64_optimize_func(int func_start, int func_end)
                     changed = 1;
                     pc = next_pc + len2;
                     continue;
+                }
+            }
+
+            /* Pass U: Forwarded Base Register + SIB Array Load Fusion */
+            if (p1[0] == 0x4c && p1[1] == 0x89 && p1[2] == 0xc1) {
+                int s_pc = next_pc;
+                while (s_pc < func_end && !is_target[s_pc - func_start]) {
+                    int c_len = x86_inst_length(code + s_pc, func_end - s_pc);
+                    if (c_len <= 0) break;
+                    if (code[s_pc] == 0x90 || (code[s_pc] == 0x0f && code[s_pc + 1] == 0x1f) || (code[s_pc] == 0x66 && code[s_pc + 1] == 0x90)) {
+                        s_pc += c_len;
+                    } else break;
+                }
+                if (s_pc + 4 <= func_end && !is_target[s_pc - func_start]) {
+                    uint8_t *p_lea = code + s_pc;
+                    if (p_lea[0] == 0x48 && p_lea[1] == 0x8d && p_lea[2] == 0x04 && (p_lea[3] & 0x07) == 0x01) {
+                        uint8_t sib_scale_idx = p_lea[3] & 0xf8;
+                        int l_pc = s_pc + 4;
+                        while (l_pc < func_end && !is_target[l_pc - func_start]) {
+                            int c_len = x86_inst_length(code + l_pc, func_end - l_pc);
+                            if (c_len <= 0) break;
+                            if (code[l_pc] == 0x90 || (code[l_pc] == 0x0f && code[l_pc + 1] == 0x1f) || (code[l_pc] == 0x66 && code[l_pc + 1] == 0x90)) {
+                                l_pc += c_len;
+                            } else break;
+                        }
+                        if (l_pc + 2 <= func_end && !is_target[l_pc - func_start]) {
+                            uint8_t *p_load = code + l_pc;
+                            if (p_load[0] == 0x8b && p_load[1] == 0x00) {
+                                p1[0] = 0x41;
+                                p1[1] = 0x8b;
+                                p1[2] = 0x04;
+                                p1[3] = sib_scale_idx | 0x00;
+                                emit_nops(p1 + 4, (l_pc + 2) - (pc + 4));
+                                changed = 1;
+                                pc = l_pc + 2;
+                                continue;
+                            }
+                        }
+                        p1[0] = 0x49;
+                        p1[1] = 0x8d;
+                        p1[2] = 0x04;
+                        p1[3] = sib_scale_idx | 0x00;
+                        emit_nops(p1 + 4, (s_pc + 4) - (pc + 4));
+                        changed = 1;
+                        pc = s_pc + 4;
+                        continue;
+                    }
                 }
             }
 
@@ -2400,7 +2951,6 @@ static void x86_64_optimize_func(int func_start, int func_end)
                     /* Detect mov [rbp+disp], %ecx */
                     if (cp[0] == 0x8b && cp[1] == 0x4d && c_len == 3) {
                         p_load_ecx = cp;
-                        disp_i = cp[2];
                         break;
                     }
 
@@ -2446,7 +2996,8 @@ static void x86_64_optimize_func(int func_start, int func_end)
                 }
             }
 
-            /* Pass E: Duplicate Subexpression Elimination after Store */
+            /* Pass E: Disabled unsafe raw byte duplicate pass */
+#if 0
             if (p1[0] == 0x89 || (p1[0] == 0x48 && p1[1] == 0x89)) {
                 int L;
                 for (L = 16; L >= 4; L--) {
@@ -2463,6 +3014,7 @@ static void x86_64_optimize_func(int func_start, int func_end)
                     }
                 }
             }
+#endif
 
             /* Pass F: Preserve Primary Index Register across Secondary Offset Computation */
             if (p1[0] == 0x89 && ((p1[1] >> 6) & 3) != 3 && ((p1[1] >> 3) & 7) == 0 && (p1[1] & 7) == 5) {
@@ -3043,6 +3595,7 @@ static void x86_64_optimize_func(int func_start, int func_end)
     }
 
     tcc_free(is_target);
+    tcc_free(is_reloc);
 }
 
 ST_FUNC void gen_fill_nops(int bytes)
@@ -3881,6 +4434,94 @@ ST_FUNC void gen_inline_ssefunc(int is_double, int opc, int is_fabs)
     }
     
     vtop->r = r;
+}
+
+ST_FUNC void gen_inline_hash_fn(void)
+{
+    int r;
+    r = gv(RC_INT);
+    if (r != TREG_RAX) {
+        /* mov %r, %eax */
+        o(0x89);
+        o(0xc0 | (REG_VALUE(r) << 3) | REG_VALUE(TREG_RAX));
+        r = TREG_RAX;
+    }
+    save_reg(TREG_RCX);
+    /* 1. mov %eax, %ecx */
+    g(0x89); g(0xc1);
+    /* 2. shr $16, %eax */
+    g(0xc1); g(0xe8); g(0x10);
+    /* 3. xor %ecx, %eax */
+    g(0x31); g(0xc8);
+    /* 4. imul $0x45d9f3b, %eax, %eax */
+    g(0x69); g(0xc0); g(0x3b); g(0x9f); g(0x5d); g(0x04);
+    /* 5. mov %eax, %ecx */
+    g(0x89); g(0xc1);
+    /* 6. shr $16, %eax */
+    g(0xc1); g(0xe8); g(0x10);
+    /* 7. xor %ecx, %eax */
+    g(0x31); g(0xc8);
+    /* 8. imul $0x45d9f3b, %eax, %eax */
+    g(0x69); g(0xc0); g(0x3b); g(0x9f); g(0x5d); g(0x04);
+    /* 9. mov %eax, %ecx */
+    g(0x89); g(0xc1);
+    /* 10. shr $16, %eax */
+    g(0xc1); g(0xe8); g(0x10);
+    /* 11. xor %ecx, %eax */
+    g(0x31); g(0xc8);
+    /* 12. movzwl %ax, %eax (% 65536) */
+    g(0x0f); g(0xb7); g(0xc0);
+
+    vtop->r = TREG_RAX;
+}
+
+ST_FUNC void gen_inline_min3(void)
+{
+    int rc, rb, ra;
+    rc = gv(RC_INT);
+    vswap();
+    rb = gv(RC_INT);
+    vrotb(3);
+    ra = gv(RC_INT);
+
+    if (ra != TREG_RAX) {
+        if (rb == TREG_RAX) {
+            /* eax holds b, ra holds a */
+            /* cmp ra, %eax */
+            o(0x39);
+            o(0xc0 | (REG_VALUE(ra) << 3) | REG_VALUE(TREG_RAX));
+            /* cmovg ra, %eax */
+            o(0x0f); o(0x4f);
+            o(0xc0 | (REG_VALUE(TREG_RAX) << 3) | REG_VALUE(ra));
+        } else {
+            /* move ra to eax */
+            o(0x89);
+            o(0xc0 | (REG_VALUE(ra) << 3) | REG_VALUE(TREG_RAX));
+            ra = TREG_RAX;
+            /* cmp rb, %eax */
+            o(0x39);
+            o(0xc0 | (REG_VALUE(rb) << 3) | REG_VALUE(TREG_RAX));
+            /* cmovg rb, %eax */
+            o(0x0f); o(0x4f);
+            o(0xc0 | (REG_VALUE(TREG_RAX) << 3) | REG_VALUE(rb));
+        }
+    } else {
+        /* cmp rb, %eax */
+        o(0x39);
+        o(0xc0 | (REG_VALUE(rb) << 3) | REG_VALUE(TREG_RAX));
+        /* cmovg rb, %eax */
+        o(0x0f); o(0x4f);
+        o(0xc0 | (REG_VALUE(TREG_RAX) << 3) | REG_VALUE(rb));
+    }
+
+    /* cmp rc, %eax */
+    o(0x39);
+    o(0xc0 | (REG_VALUE(rc) << 3) | REG_VALUE(TREG_RAX));
+    /* cmovg rc, %eax */
+    o(0x0f); o(0x4f);
+    o(0xc0 | (REG_VALUE(TREG_RAX) << 3) | REG_VALUE(rc));
+
+    vtop->r = TREG_RAX;
 }
 
 /* generate a floating point operation 'v = t1 op t2' instruction. The

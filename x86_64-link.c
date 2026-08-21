@@ -28,6 +28,7 @@
 ST_FUNC int code_reloc (int reloc_type)
 {
     switch (reloc_type) {
+        case R_X86_64_NONE:
         case R_X86_64_32:
         case R_X86_64_32S:
         case R_X86_64_64:
@@ -67,6 +68,7 @@ ST_FUNC int code_reloc (int reloc_type)
 ST_FUNC int gotplt_entry_type (int reloc_type)
 {
     switch (reloc_type) {
+        case R_X86_64_NONE:
         case R_X86_64_GLOB_DAT:
         case R_X86_64_JUMP_SLOT:
         case R_X86_64_COPY:

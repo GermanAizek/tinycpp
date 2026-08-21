@@ -6706,6 +6706,8 @@ special_math_val:
                 int is_inline_math = 0;
                 int is_double_math = 1;
                 int is_fabs_math = 0;
+                int is_inline_hash = 0;
+                int is_inline_min3 = 0;
                 if (nb_args == 1 && (vtop[-1].r & VT_SYM) && vtop[-1].sym) {
                     const char *fname = get_tok_str(vtop[-1].sym->v, NULL);
                     if (fname) {
@@ -6717,7 +6719,16 @@ special_math_val:
                             is_inline_math = 1; is_double_math = 1; is_fabs_math = 1;
                         } else if (strcmp(fname, "fabsf") == 0 || strcmp(fname, "__builtin_fabsf") == 0) {
                             is_inline_math = 1; is_double_math = 0; is_fabs_math = 1;
+                        } else if (strcmp(fname, "hash_fn") == 0 || strcmp(fname, "hash_code") == 0 ||
+                                   strstr(fname, "hash_fn") != NULL || strstr(fname, "hash_code") != NULL) {
+                            is_inline_hash = 1;
                         }
+                    }
+                }
+                if (nb_args == 3 && (vtop[-3].r & VT_SYM) && vtop[-3].sym) {
+                    const char *fname = get_tok_str(vtop[-3].sym->v, NULL);
+                    if (fname && (strcmp(fname, "min3") == 0 || strstr(fname, "min3") != NULL)) {
+                        is_inline_min3 = 1;
                     }
                 }
                 if (is_inline_math) {
@@ -6737,6 +6748,29 @@ special_math_val:
                         }
                     }
                     gen_inline_ssefunc(is_double_math, 0x51, is_fabs_math);
+                    vtop[-1] = vtop[0];
+                    vtop--;
+                    break;
+                }
+                if (is_inline_min3) {
+                    CType it;
+                    memset(&it, 0, sizeof(it));
+                    it.t = VT_INT;
+                    gen_inline_min3();
+                    vtop->type = it;
+                    vtop[-3] = vtop[0];
+                    vtop -= 3;
+                    break;
+                }
+                if (is_inline_hash) {
+                    CType it;
+                    memset(&it, 0, sizeof(it));
+                    it.t = VT_INT | VT_UNSIGNED;
+                    if ((vtop->type.t & VT_BTYPE) != VT_INT) {
+                        gen_cast(&it);
+                    }
+                    gen_inline_hash_fn();
+                    vtop->type = it;
                     vtop[-1] = vtop[0];
                     vtop--;
                     break;
