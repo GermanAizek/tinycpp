@@ -608,7 +608,11 @@ static void tcc_split_path(TCCState *s, void *p_ary, int *p_nb_ary, const char *
         }
         if (str.size) {
             cstr_ccat(&str, '\0');
-            dynarray_add(p_ary, p_nb_ary, str.data);
+            if (strchr(str.data, '{') != NULL || access(str.data, F_OK) == 0) {
+                dynarray_add(p_ary, p_nb_ary, str.data);
+            } else {
+                tcc_free(str.data);
+            }
         }
         in = p+1;
     } while (*p);

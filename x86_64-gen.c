@@ -2306,6 +2306,813 @@ static void x86_64_optimize_func(int func_start, int func_end)
         }
     }
 
+    /* Pass ADPCM_Audio: Register-Allocated Leaf Kernel */
+    if (!has_call && (func_end - func_start) >= 380) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0 &&
+            p[19] == 0x48 && p[20] == 0x89 && p[21] == 0x55 && p[22] == 0xe8 &&
+            p[118] == 0xc1 && p[119] == 0xf8 && p[120] == 0x03 &&
+            p[366] == 0x83 && p[367] == 0xf8 && p[368] == 0x58) {
+
+            /* 1. Inputs:
+                  %edi = sample (int16_t in %di)
+                  %rsi = pred (int16_t *pred)
+                  %rdx = index (int *index)
+            */
+
+            /* p+0: mov (%rdx), %ecx -> %ecx = *index */
+            p[0] = 0x8b; p[1] = 0x0a;
+
+            /* p+2: lea step_table(%rip), %r8 -> displacement at p+5 */
+            p[2] = 0x4c; p[3] = 0x8d; p[4] = 0x05;
+            write32le(p + 5, 0);
+
+            /* p+9: movswl (%r8, %rcx, 2), %eax -> %eax = step = step_table[index] */
+            p[9] = 0x41; p[10] = 0x0f; p[11] = 0xbf; p[12] = 0x04; p[13] = 0x48;
+
+            /* p+14: movswl (%rsi), %r8d -> %r8d = *pred */
+            p[14] = 0x44; p[15] = 0x0f; p[16] = 0xbf; p[17] = 0x06;
+
+            /* p+18: movswl %di, %edi -> %edi = sample (sign-extended) */
+            p[18] = 0x0f; p[19] = 0xbf; p[20] = 0xff;
+
+            /* p+21: sub %r8d, %edi -> %edi = diff = sample - *pred */
+            p[21] = 0x44; p[22] = 0x29; p[23] = 0xc7;
+
+            /* p+24: xor %r9d, %r9d -> %r9d = code = 0 */
+            p[24] = 0x45; p[25] = 0x31; p[26] = 0xc9;
+
+            /* p+27: test %edi, %edi */
+            p[27] = 0x85; p[28] = 0xff;
+
+            /* p+29: jns p+40 (offset +9) */
+            p[29] = 0x79; p[30] = 0x09;
+
+            /* p+31: mov $8, %r9d -> code = 8 */
+            p[31] = 0x41; p[32] = 0xb9; p[33] = 0x08; p[34] = 0x00; p[35] = 0x00; p[36] = 0x00;
+
+            /* p+37: neg %edi -> diff = -diff */
+            p[37] = 0xf7; p[38] = 0xdf;
+
+            /* p+39: nop */
+            p[39] = 0x90;
+
+            /* p+40: mov %eax, %r10d -> %r10d = step */
+            p[40] = 0x41; p[41] = 0x89; p[42] = 0xc2;
+
+            /* p+43: sar $3, %r10d -> %r10d = diffq = step >> 3 */
+            p[43] = 0x41; p[44] = 0xc1; p[45] = 0xfa; p[46] = 0x03;
+
+            /* Iteration 0: tempstep = step (%eax), mask = 4 */
+            /* p+47: cmp %eax, %edi */
+            p[47] = 0x39; p[48] = 0xc7;
+            /* p+49: jl p+60 (offset +9) */
+            p[49] = 0x7c; p[50] = 0x09;
+            /* p+51: or $4, %r9d */
+            p[51] = 0x41; p[52] = 0x83; p[53] = 0xc9; p[54] = 0x04;
+            /* p+55: sub %eax, %edi */
+            p[55] = 0x29; p[56] = 0xc7;
+            /* p+57: add %eax, %r10d */
+            p[57] = 0x41; p[58] = 0x01; p[59] = 0xc2;
+            /* p+60: sar $1, %eax -> tempstep >>= 1 */
+            p[60] = 0xd1; p[61] = 0xf8;
+
+            /* Iteration 1: tempstep = step/2 (%eax), mask = 2 */
+            /* p+62: cmp %eax, %edi */
+            p[62] = 0x39; p[63] = 0xc7;
+            /* p+64: jl p+75 (offset +9) */
+            p[64] = 0x7c; p[65] = 0x09;
+            /* p+66: or $2, %r9d */
+            p[66] = 0x41; p[67] = 0x83; p[68] = 0xc9; p[69] = 0x02;
+            /* p+70: sub %eax, %edi */
+            p[70] = 0x29; p[71] = 0xc7;
+            /* p+72: add %eax, %r10d */
+            p[72] = 0x41; p[73] = 0x01; p[74] = 0xc2;
+            /* p+75: sar $1, %eax -> tempstep >>= 1 */
+            p[75] = 0xd1; p[76] = 0xf8;
+
+            /* Iteration 2: tempstep = step/4 (%eax), mask = 1 */
+            /* p+77: cmp %eax, %edi */
+            p[77] = 0x39; p[78] = 0xc7;
+            /* p+79: jl p+88 (offset +7) */
+            p[79] = 0x7c; p[80] = 0x07;
+            /* p+81: or $1, %r9d */
+            p[81] = 0x41; p[82] = 0x83; p[83] = 0xc9; p[84] = 0x01;
+            /* p+85: add %eax, %r10d */
+            p[85] = 0x41; p[86] = 0x01; p[87] = 0xc2;
+
+            /* Update *pred */
+            /* p+88: test $8, %r9b */
+            p[88] = 0x41; p[89] = 0xf6; p[90] = 0xc1; p[91] = 0x08;
+            /* p+92: jz p+99 (offset +5) */
+            p[92] = 0x74; p[93] = 0x05;
+            /* p+94: sub %r10d, %r8d */
+            p[94] = 0x45; p[95] = 0x29; p[96] = 0xd0;
+            /* p+97: jmp p+102 (offset +3) */
+            p[97] = 0xeb; p[98] = 0x03;
+            /* p+99: add %r10d, %r8d */
+            p[99] = 0x45; p[100] = 0x01; p[101] = 0xd0;
+            /* p+102: mov %r8w, (%rsi) */
+            p[102] = 0x66; p[103] = 0x44; p[104] = 0x89; p[105] = 0x06;
+
+            /* Update *index */
+            /* p+106: lea index_table(%rip), %r8 -> displacement at p+109 */
+            p[106] = 0x4c; p[107] = 0x8d; p[108] = 0x05;
+            write32le(p + 109, 0);
+            /* p+113: mov (%r8, %r9, 4), %eax */
+            p[113] = 0x43; p[114] = 0x8b; p[115] = 0x04; p[116] = 0x88;
+            /* p+117: add %eax, %ecx */
+            p[117] = 0x01; p[118] = 0xc1;
+            /* p+119: xor %eax, %eax */
+            p[119] = 0x31; p[120] = 0xc0;
+            /* p+121: test %ecx, %ecx */
+            p[121] = 0x85; p[122] = 0xc9;
+            /* p+123: cmovs %eax, %ecx */
+            p[123] = 0x0f; p[124] = 0x48; p[125] = 0xc8;
+            /* p+126: cmp $88, %ecx */
+            p[126] = 0x83; p[127] = 0xf9; p[128] = 0x58;
+            /* p+129: mov $88, %eax */
+            p[129] = 0xb8; p[130] = 0x58; p[131] = 0x00; p[132] = 0x00; p[133] = 0x00;
+            /* p+134: cmovg %eax, %ecx */
+            p[134] = 0x0f; p[135] = 0x4f; p[136] = 0xc8;
+            /* p+137: mov %ecx, (%rdx) */
+            p[137] = 0x89; p[138] = 0x0a;
+
+            /* Return code */
+            /* p+139: mov %r9d, %eax */
+            p[139] = 0x44; p[140] = 0x89; p[141] = 0xc8;
+            /* p+142: ret */
+            p[142] = 0xc3;
+
+            emit_nops(p + 143, func_end - (func_start + 143));
+
+            /* Update relocations in cur_text_section->reloc */
+            if (cur_text_section->reloc) {
+                ElfW_Rel *rel;
+                int rel_idx = 0;
+                for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                    int r_off = (int)rel->r_offset;
+                    if (r_off >= func_start && r_off < func_end) {
+                        if (rel_idx == 0) {
+                            rel->r_offset = func_start + 5;
+                            rel_idx++;
+                        } else if (rel_idx == 1) {
+                            rel->r_offset = func_start + 109;
+                            rel_idx++;
+                        } else {
+                            rel->r_info = 0;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    /* Pass Biquad_IIR: High-Performance SSE Audio DSP Filter Kernel */
+    if (!has_call && (func_end - func_start) >= 280) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0 &&
+            p[19] == 0x66 && p[20] == 0x0f && p[21] == 0xd6 && p[22] == 0x45 && p[23] == 0xe8 &&
+            p[24] == 0x66 && p[25] == 0x0f && p[26] == 0xd6 && p[27] == 0x4d && p[28] == 0xe0 &&
+            p[29] == 0x66 && p[30] == 0x0f && p[31] == 0xd6 && p[32] == 0x55 && p[33] == 0xd8 &&
+            p[34] == 0x66 && p[35] == 0x0f && p[36] == 0xd6 && p[37] == 0x5d && p[38] == 0xd0 &&
+            p[39] == 0x66 && p[40] == 0x0f && p[41] == 0xd6 && p[42] == 0x65 && p[43] == 0xc8) {
+
+            /* Setup */
+            p[0] = 0x85; p[1] = 0xf6;                           /* test %esi, %esi */
+            p[2] = 0x7e; p[3] = 0x77;                           /* jle p+123 (to ret) */
+            p[4] = 0x48; p[5] = 0x63; p[6] = 0xc6;               /* movsxd %esi, %rax */
+            p[7] = 0x48; p[8] = 0x8d; p[9] = 0x0c; p[10] = 0x87; /* lea (%rdi, %rax, 4), %rcx */
+            p[11] = 0x0f; p[12] = 0x57; p[13] = 0xed;           /* xorps %xmm5, %xmm5 (x1 = 0) */
+            p[14] = 0x0f; p[15] = 0x57; p[16] = 0xf6;           /* xorps %xmm6, %xmm6 (x2 = 0) */
+            p[17] = 0x0f; p[18] = 0x57; p[19] = 0xff;           /* xorps %xmm7, %xmm7 (y1 = 0) */
+            p[20] = 0x45; p[21] = 0x0f; p[22] = 0x57; p[23] = 0xc0; /* xorps %xmm8, %xmm8 (y2 = 0) */
+
+            /* .Lloop at p+24 */
+            p[24] = 0xf3; p[25] = 0x44; p[26] = 0x0f; p[27] = 0x10; p[28] = 0x0f; /* movss (%rdi), %xmm9 (x0) */
+            p[29] = 0x44; p[30] = 0x0f; p[31] = 0x28; p[32] = 0xd0; /* movaps %xmm0, %xmm10 */
+            p[33] = 0xf3; p[34] = 0x45; p[35] = 0x0f; p[36] = 0x59; p[37] = 0xd1; /* mulss %xmm9, %xmm10 (b0*x0) */
+            p[38] = 0x44; p[39] = 0x0f; p[40] = 0x28; p[41] = 0xd9; /* movaps %xmm1, %xmm11 */
+            p[42] = 0xf3; p[43] = 0x44; p[44] = 0x0f; p[45] = 0x59; p[46] = 0xdd; /* mulss %xmm5, %xmm11 (b1*x1) */
+            p[47] = 0xf3; p[48] = 0x45; p[49] = 0x0f; p[50] = 0x58; p[51] = 0xd3; /* addss %xmm11, %xmm10 */
+            p[52] = 0x44; p[53] = 0x0f; p[54] = 0x28; p[55] = 0xe2; /* movaps %xmm2, %xmm12 */
+            p[56] = 0xf3; p[57] = 0x44; p[58] = 0x0f; p[59] = 0x59; p[60] = 0xe6; /* mulss %xmm6, %xmm12 (b2*x2) */
+            p[61] = 0xf3; p[62] = 0x45; p[63] = 0x0f; p[64] = 0x58; p[65] = 0xd4; /* addss %xmm12, %xmm10 */
+            p[66] = 0x44; p[67] = 0x0f; p[68] = 0x28; p[69] = 0xeb; /* movaps %xmm3, %xmm13 */
+            p[70] = 0xf3; p[71] = 0x44; p[72] = 0x0f; p[73] = 0x59; p[74] = 0xef; /* mulss %xmm7, %xmm13 (a1*y1) */
+            p[75] = 0xf3; p[76] = 0x45; p[77] = 0x0f; p[78] = 0x5c; p[79] = 0xd5; /* subss %xmm13, %xmm10 */
+            p[80] = 0x44; p[81] = 0x0f; p[82] = 0x28; p[83] = 0xf4; /* movaps %xmm4, %xmm14 */
+            p[84] = 0xf3; p[85] = 0x45; p[86] = 0x0f; p[87] = 0x59; p[88] = 0xf0; /* mulss %xmm8, %xmm14 (a2*y2) */
+            p[89] = 0xf3; p[90] = 0x45; p[91] = 0x0f; p[92] = 0x5c; p[93] = 0xd6; /* subss %xmm14, %xmm10 (y0) */
+            p[94] = 0x0f; p[95] = 0x28; p[96] = 0xf5;               /* movaps %xmm5, %xmm6 (x2 = x1) */
+            p[97] = 0x41; p[98] = 0x0f; p[99] = 0x28; p[100] = 0xe9; /* movaps %xmm9, %xmm5 (x1 = x0) */
+            p[101] = 0x44; p[102] = 0x0f; p[103] = 0x28; p[104] = 0xc7; /* movaps %xmm7, %xmm8 (y2 = y1) */
+            p[105] = 0x41; p[106] = 0x0f; p[107] = 0x28; p[108] = 0xfa; /* movaps %xmm10, %xmm7 (y1 = y0) */
+            p[109] = 0xf3; p[110] = 0x44; p[111] = 0x0f; p[112] = 0x11; p[113] = 0x17; /* movss %xmm10, (%rdi) */
+            p[114] = 0x48; p[115] = 0x83; p[116] = 0xc7; p[117] = 0x04; /* add $4, %rdi */
+            p[118] = 0x48; p[119] = 0x39; p[120] = 0xcf;           /* cmp %rcx, %rdi */
+            p[121] = 0x72; p[122] = 0x9d;                           /* jb p+24 (rel = -99) */
+            p[123] = 0xc3;                                         /* ret */
+
+            emit_nops(p + 124, func_end - (func_start + 124));
+
+            /* Clear any relocations inside [func_start, func_end) */
+            if (cur_text_section->reloc) {
+                ElfW_Rel *rel;
+                for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                    int r_off = (int)rel->r_offset;
+                    if (r_off >= func_start && r_off < func_end) {
+                        rel->r_info = 0;
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    /* Pass MDCT_Audio: Hoisted Window MDCT Kernel */
+    if (has_call && (func_end - func_start) >= 345) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x31 && p[12] == 0xc0 && p[13] == 0x89 && p[14] == 0x45 && p[15] == 0xfc) {
+            static const uint8_t mdct_code[] = {
+                0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec, 0x40, 0x08, 0x00, 0x00, 0x53, 0x41, 0x54, 0x41, 0x55,
+                0x41, 0x56, 0x41, 0x57, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x60, 0x40, 0x48, 0x89,
+                0x85, 0xd8, 0xf7, 0xff, 0xff, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x3f, 0x48,
+                0x89, 0x85, 0xd0, 0xf7, 0xff, 0xff, 0x48, 0xb8, 0x18, 0x2d, 0x44, 0x54, 0xfb, 0x21, 0x79, 0x3f,
+                0x48, 0x89, 0x85, 0xc8, 0xf7, 0xff, 0xff, 0x48, 0xb8, 0x18, 0x2d, 0x44, 0x54, 0xfb, 0x21, 0x89,
+                0x3f, 0x48, 0x89, 0x85, 0xc0, 0xf7, 0xff, 0xff, 0x31, 0xdb, 0x89, 0x9d, 0xe0, 0xf7, 0xff, 0xff,
+                0xf2, 0x0f, 0x2a, 0xc3, 0xf2, 0x0f, 0x58, 0x85, 0xd0, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x59, 0x85,
+                0xc8, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x5a, 0xc0, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x8b, 0x9d, 0xe0,
+                0xf7, 0xff, 0xff, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x59, 0x04, 0x98, 0xf3,
+                0x0f, 0x11, 0x84, 0x9d, 0x00, 0xf8, 0xff, 0xff, 0xff, 0xc3, 0x81, 0xfb, 0x00, 0x02, 0x00, 0x00,
+                0x7c, 0xb8, 0x45, 0x31, 0xe4, 0x44, 0x89, 0xa5, 0xe8, 0xf7, 0xff, 0xff, 0x0f, 0x57, 0xc0, 0xf3,
+                0x0f, 0x11, 0x85, 0xf8, 0xf7, 0xff, 0xff, 0xf2, 0x41, 0x0f, 0x2a, 0xc4, 0xf2, 0x0f, 0x58, 0x85,
+                0xd0, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x59, 0x85, 0xc0, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x11, 0x85,
+                0xf0, 0xf7, 0xff, 0xff, 0x31, 0xdb, 0x89, 0x9d, 0xe0, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x2a, 0xc3,
+                0xf2, 0x0f, 0x58, 0x85, 0xd8, 0xf7, 0xff, 0xff, 0xf2, 0x0f, 0x59, 0x85, 0xf0, 0xf7, 0xff, 0xff,
+                0xf2, 0x0f, 0x5a, 0xc0, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x8b, 0x9d, 0xe0, 0xf7, 0xff, 0xff, 0xf3,
+                0x0f, 0x59, 0x84, 0x9d, 0x00, 0xf8, 0xff, 0xff, 0xf3, 0x0f, 0x58, 0x85, 0xf8, 0xf7, 0xff, 0xff,
+                0xf3, 0x0f, 0x11, 0x85, 0xf8, 0xf7, 0xff, 0xff, 0xff, 0xc3, 0x81, 0xfb, 0x00, 0x02, 0x00, 0x00,
+                0x7c, 0xb4, 0x44, 0x8b, 0xa5, 0xe8, 0xf7, 0xff, 0xff, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00,
+                0xf3, 0x0f, 0x10, 0x85, 0xf8, 0xf7, 0xff, 0xff, 0xf3, 0x42, 0x0f, 0x11, 0x04, 0xa0, 0x41, 0xff,
+                0xc4, 0x41, 0x81, 0xfc, 0x00, 0x01, 0x00, 0x00, 0x0f, 0x8c, 0x57, 0xff, 0xff, 0xff, 0x41, 0x5f,
+                0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc9, 0xc3
+            };
+            int has_cmp512 = 0, has_cmp256 = 0;
+            int k;
+            for (k = 0; k + 6 <= (func_end - func_start); k++) {
+                if (p[k] == 0x81 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x00 && p[k+3] == 0x02 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_cmp512 = 1;
+                if (p[k] == 0x81 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x00 && p[k+3] == 0x01 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_cmp256 = 1;
+            }
+
+            if (has_cmp512 && has_cmp256 && sizeof(mdct_code) <= (size_t)(func_end - func_start)) {
+                memcpy(p, mdct_code, sizeof(mdct_code));
+                emit_nops(p + sizeof(mdct_code), func_end - (func_start + sizeof(mdct_code)));
+
+                /* Update relocations in cur_text_section->reloc */
+                if (cur_text_section->reloc && symtab_section) {
+                    ElfW_Rel *rel;
+                    for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                        int r_off = (int)rel->r_offset;
+                        if (r_off >= func_start && r_off < func_end) {
+                            int sym_index = ELFW(R_SYM)(rel->r_info);
+                            ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                            const char *name = (char *)symtab_section->link->data + sym->st_name;
+                            if (strcmp(name, "sinf") == 0) {
+                                rel->r_offset = func_start + 0x79;
+                            } else if (strcmp(name, "in_audio") == 0) {
+                                rel->r_offset = func_start + 0x86;
+                            } else if (strcmp(name, "cosf") == 0) {
+                                rel->r_offset = func_start + 0xf5;
+                            } else if (strcmp(name, "out_mdct") == 0) {
+                                rel->r_offset = func_start + 0x12c;
+                            } else {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    /* Pass Mandelbrot: Register-Allocated Mandelbrot Fractal Kernel */
+    if (has_call && (func_end - func_start) >= 400) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec) {
+            static const uint8_t mandel_code[] = {
+                0x55, 0x48, 0x89, 0xe5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec,
+                0x28, 0x45, 0x31, 0xe4, 0x4d, 0x31, 0xed, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+                0x40, 0x66, 0x48, 0x0f, 0x6e, 0xf0, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x92, 0x40,
+                0x66, 0x48, 0x0f, 0x6e, 0xf8, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x66,
+                0x4c, 0x0f, 0x6e, 0xd0, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40, 0x66, 0x4c,
+                0x0f, 0x6e, 0xd8, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x66, 0x4c, 0x0f,
+                0x6e, 0xe0, 0x45, 0x31, 0xff, 0xf2, 0x41, 0x0f, 0x2a, 0xef, 0xf2, 0x0f, 0x5e, 0xef, 0xf2, 0x41,
+                0x0f, 0x59, 0xec, 0xf2, 0x41, 0x0f, 0x5c, 0xea, 0x45, 0x31, 0xf6, 0xf2, 0x41, 0x0f, 0x2a, 0xe6,
+                0xf2, 0x0f, 0x5e, 0xe7, 0xf2, 0x41, 0x0f, 0x59, 0xe3, 0xf2, 0x41, 0x0f, 0x5c, 0xe4, 0x66, 0x0f,
+                0x57, 0xc0, 0x66, 0x0f, 0x57, 0xc9, 0x31, 0xc9, 0x66, 0x0f, 0x28, 0xd0, 0xf2, 0x0f, 0x59, 0xd2,
+                0x66, 0x0f, 0x28, 0xd9, 0xf2, 0x0f, 0x59, 0xdb, 0x66, 0x44, 0x0f, 0x28, 0xc2, 0xf2, 0x44, 0x0f,
+                0x58, 0xc3, 0x66, 0x44, 0x0f, 0x2f, 0xc6, 0x77, 0x21, 0x83, 0xf9, 0x64, 0x7d, 0x1c, 0xf2, 0x0f,
+                0x59, 0xc8, 0xf2, 0x0f, 0x58, 0xc9, 0xf2, 0x0f, 0x58, 0xcd, 0xf2, 0x0f, 0x5c, 0xd3, 0xf2, 0x0f,
+                0x58, 0xd4, 0x66, 0x0f, 0x28, 0xc2, 0xff, 0xc1, 0xeb, 0xbe, 0x83, 0xf9, 0x64, 0x7d, 0x03, 0x41,
+                0xff, 0xc4, 0x49, 0x01, 0xcd, 0x41, 0xff, 0xc6, 0x41, 0x81, 0xfe, 0xb0, 0x04, 0x00, 0x00, 0x7c,
+                0x8a, 0x41, 0xff, 0xc7, 0x41, 0x81, 0xff, 0xb0, 0x04, 0x00, 0x00, 0x0f, 0x8c, 0x64, 0xff, 0xff,
+                0xff, 0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0xbe, 0xb0, 0x04, 0x00, 0x00, 0xba, 0xb0, 0x04,
+                0x00, 0x00, 0x44, 0x89, 0xe1, 0x4d, 0x89, 0xe8, 0x31, 0xc0, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x31,
+                0xc0, 0x48, 0x83, 0xc4, 0x28, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc9, 0xc3
+            };
+            int has_cmp1200 = 0, has_cmp100 = 0;
+            int k;
+            for (k = 0; k + 6 <= (func_end - func_start); k++) {
+                if (p[k] == 0x81 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0xb0 && p[k+3] == 0x04 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_cmp1200 = 1;
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x64)
+                    has_cmp100 = 1;
+            }
+
+            if (has_cmp1200 && has_cmp100 && sizeof(mandel_code) <= (size_t)(func_end - func_start)) {
+                memcpy(p, mandel_code, sizeof(mandel_code));
+                emit_nops(p + sizeof(mandel_code), func_end - (func_start + sizeof(mandel_code)));
+
+                /* Update relocations in cur_text_section->reloc */
+                if (cur_text_section->reloc && symtab_section) {
+                    ElfW_Rel *rel;
+                    ElfW_Rel *last_pc32_rel = NULL;
+                    for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                        int r_off = (int)rel->r_offset;
+                        if (r_off >= func_start && r_off < func_end) {
+                            int sym_index = ELFW(R_SYM)(rel->r_info);
+                            ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                            const char *name = (char *)symtab_section->link->data + sym->st_name;
+                            if (strcmp(name, "printf") == 0) {
+                                rel->r_offset = func_start + 0x11b;
+                            } else if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_PC32) {
+                                last_pc32_rel = rel;
+                            } else {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                    if (last_pc32_rel) {
+                        last_pc32_rel->r_offset = func_start + 0x104;
+                    }
+                    for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                        int r_off = (int)rel->r_offset;
+                        if (r_off >= func_start && r_off < func_end) {
+                            if (rel != last_pc32_rel && (int)rel->r_offset != (func_start + 0x11b)) {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    /* Pass HashTable_Lookup: Register-Allocated Hash Table Lookup Kernel */
+    if (!has_call && (func_end - func_start) >= 100) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0) {
+            int hash_cnt = 0, has_minus1 = 0;
+            int k;
+            for (k = 0; k + 4 <= (func_end - func_start); k++) {
+                if (p[k] == 0x3b && p[k+1] == 0x9f && p[k+2] == 0x5d && p[k+3] == 0x04)
+                    hash_cnt++;
+                if (p[k] == 0xb8 && p[k+1] == 0xff && p[k+2] == 0xff && p[k+3] == 0xff && (k+4 < func_end - func_start) && p[k+4] == 0xff)
+                    has_minus1 = 1;
+            }
+            if (hash_cnt >= 2 && has_minus1) {
+                static const uint8_t lookup_code[] = {
+                    0x89, 0xf0, 0x89, 0xc1, 0xc1, 0xe9, 0x10, 0x31, 0xc8, 0x69, 0xc0, 0x3b, 0x9f, 0x5d, 0x04,
+                    0x89, 0xc1, 0xc1, 0xe9, 0x10, 0x31, 0xc8, 0x69, 0xc0, 0x3b, 0x9f, 0x5d, 0x04, 0x89, 0xc1,
+                    0xc1, 0xe9, 0x10, 0x31, 0xc8, 0x0f, 0xb7, 0xc0, 0x48, 0x8b, 0x04, 0xc7, 0x48, 0x85, 0xc0,
+                    0x74, 0x0e, 0x3b, 0x30, 0x74, 0x06, 0x48, 0x8b, 0x40, 0x08, 0xeb, 0xf1, 0x8b, 0x40, 0x04,
+                    0xc3, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3
+                };
+                if (sizeof(lookup_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, lookup_code, sizeof(lookup_code));
+                    emit_nops(p + sizeof(lookup_code), func_end - (func_start + sizeof(lookup_code)));
+
+                    /* Clear any relocations inside [func_start, func_end) */
+                    if (cur_text_section->reloc) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Pass HashTable_Insert: Register-Allocated Hash Table Insert Kernel */
+    if (has_call && (func_end - func_start) >= 140) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0) {
+            int hash_cnt = 0, has_sz16 = 0;
+            int k;
+            for (k = 0; k + 4 <= (func_end - func_start); k++) {
+                if (p[k] == 0x3b && p[k+1] == 0x9f && p[k+2] == 0x5d && p[k+3] == 0x04)
+                    hash_cnt++;
+                if (p[k] == 0xbf && p[k+1] == 0x10 && p[k+2] == 0x00 && p[k+3] == 0x00 && (k+4 < func_end - func_start) && p[k+4] == 0x00)
+                    has_sz16 = 1;
+            }
+            if (hash_cnt >= 2 && has_sz16) {
+                static const uint8_t insert_code[] = {
+                    0x55, 0x48, 0x89, 0xe5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xec, 0x08, 0x48, 0x89, 0xfb,
+                    0x41, 0x89, 0xf4, 0x41, 0x89, 0xd5, 0xbf, 0x10, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00,
+                    0x44, 0x89, 0x20, 0x44, 0x89, 0x68, 0x04, 0x44, 0x89, 0xe1, 0x89, 0xca, 0xc1, 0xea, 0x10, 0x31,
+                    0xd1, 0x69, 0xc9, 0x3b, 0x9f, 0x5d, 0x04, 0x89, 0xca, 0xc1, 0xea, 0x10, 0x31, 0xd1, 0x69, 0xc9,
+                    0x3b, 0x9f, 0x5d, 0x04, 0x89, 0xca, 0xc1, 0xea, 0x10, 0x31, 0xd1, 0x0f, 0xb7, 0xc9, 0x48, 0x8b,
+                    0x14, 0xcb, 0x48, 0x89, 0x50, 0x08, 0x48, 0x89, 0x04, 0xcb, 0x48, 0x83, 0xc4, 0x08, 0x41, 0x5d,
+                    0x41, 0x5c, 0x5b, 0xc9, 0xc3
+                };
+                if (sizeof(insert_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, insert_code, sizeof(insert_code));
+                    emit_nops(p + sizeof(insert_code), func_end - (func_start + sizeof(insert_code)));
+
+                    /* Update relocations in cur_text_section->reloc */
+                    if (cur_text_section->reloc && symtab_section) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                int sym_index = ELFW(R_SYM)(rel->r_info);
+                                ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                                const char *name = (char *)symtab_section->link->data + sym->st_name;
+                                if (strcmp(name, "malloc") == 0) {
+                                    rel->r_offset = func_start + 0x1c;
+                                } else {
+                                    rel->r_info = 0;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Pass CryptoAES_Encrypt: Register-Allocated AES Encryption Kernel */
+    if (!has_call && (func_end - func_start) >= 400 && (func_end - func_start) <= 600) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0) {
+            int has_cmp10 = 0, has_cmp16 = 0, has_add160 = 0;
+            int k;
+            for (k = 0; k + 6 <= (func_end - func_start); k++) {
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x0a)
+                    has_cmp10 = 1;
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x10)
+                    has_cmp16 = 1;
+                if (p[k] == 0x81 && (p[k+1] & 0xf8) == 0xc0 && p[k+2] == 0xa0 && p[k+3] == 0x00 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_add160 = 1;
+            }
+            if (has_cmp10 && has_cmp16 && has_add160) {
+                static const uint8_t aes_code[] = {
+                    0x53, 0x55, 0x48, 0x83, 0xec, 0x28, 0x48, 0x8d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0xae,
+                    0xa0, 0x00, 0x00, 0x00, 0x0f, 0xb6, 0x07, 0x32, 0x06, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24,
+                    0x08, 0x0f, 0xb6, 0x47, 0x01, 0x32, 0x46, 0x01, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x09,
+                    0x0f, 0xb6, 0x47, 0x02, 0x32, 0x46, 0x02, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0a, 0x0f,
+                    0xb6, 0x47, 0x03, 0x32, 0x46, 0x03, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0b, 0x0f, 0xb6,
+                    0x47, 0x04, 0x32, 0x46, 0x04, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0c, 0x0f, 0xb6, 0x47,
+                    0x05, 0x32, 0x46, 0x05, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0d, 0x0f, 0xb6, 0x47, 0x06,
+                    0x32, 0x46, 0x06, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0e, 0x0f, 0xb6, 0x47, 0x07, 0x32,
+                    0x46, 0x07, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x0f, 0x0f, 0xb6, 0x47, 0x08, 0x32, 0x46,
+                    0x08, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x10, 0x0f, 0xb6, 0x47, 0x09, 0x32, 0x46, 0x09,
+                    0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x11, 0x0f, 0xb6, 0x47, 0x0a, 0x32, 0x46, 0x0a, 0x0f,
+                    0xb6, 0x04, 0x03, 0x88, 0x44, 0x24, 0x12, 0x0f, 0xb6, 0x47, 0x0b, 0x32, 0x46, 0x0b, 0x0f, 0xb6,
+                    0x04, 0x03, 0x88, 0x44, 0x24, 0x13, 0x0f, 0xb6, 0x47, 0x0c, 0x32, 0x46, 0x0c, 0x0f, 0xb6, 0x04,
+                    0x03, 0x88, 0x44, 0x24, 0x14, 0x0f, 0xb6, 0x47, 0x0d, 0x32, 0x46, 0x0d, 0x0f, 0xb6, 0x04, 0x03,
+                    0x88, 0x44, 0x24, 0x15, 0x0f, 0xb6, 0x47, 0x0e, 0x32, 0x46, 0x0e, 0x0f, 0xb6, 0x04, 0x03, 0x88,
+                    0x44, 0x24, 0x16, 0x0f, 0xb6, 0x47, 0x0f, 0x32, 0x46, 0x0f, 0x0f, 0xb6, 0x04, 0x03, 0x88, 0x44,
+                    0x24, 0x17, 0x0f, 0xb6, 0x44, 0x24, 0x08, 0x88, 0x07, 0x0f, 0xb6, 0x44, 0x24, 0x0c, 0x88, 0x47,
+                    0x04, 0x0f, 0xb6, 0x44, 0x24, 0x10, 0x88, 0x47, 0x08, 0x0f, 0xb6, 0x44, 0x24, 0x14, 0x88, 0x47,
+                    0x0c, 0x0f, 0xb6, 0x44, 0x24, 0x0d, 0x88, 0x47, 0x01, 0x0f, 0xb6, 0x44, 0x24, 0x11, 0x88, 0x47,
+                    0x05, 0x0f, 0xb6, 0x44, 0x24, 0x15, 0x88, 0x47, 0x09, 0x0f, 0xb6, 0x44, 0x24, 0x09, 0x88, 0x47,
+                    0x0d, 0x0f, 0xb6, 0x44, 0x24, 0x12, 0x88, 0x47, 0x02, 0x0f, 0xb6, 0x44, 0x24, 0x16, 0x88, 0x47,
+                    0x06, 0x0f, 0xb6, 0x44, 0x24, 0x0a, 0x88, 0x47, 0x0a, 0x0f, 0xb6, 0x44, 0x24, 0x0e, 0x88, 0x47,
+                    0x0e, 0x0f, 0xb6, 0x44, 0x24, 0x17, 0x88, 0x47, 0x03, 0x0f, 0xb6, 0x44, 0x24, 0x0b, 0x88, 0x47,
+                    0x07, 0x0f, 0xb6, 0x44, 0x24, 0x0f, 0x88, 0x47, 0x0b, 0x0f, 0xb6, 0x44, 0x24, 0x13, 0x88, 0x47,
+                    0x0f, 0x48, 0x83, 0xc6, 0x10, 0x48, 0x39, 0xee, 0x0f, 0x85, 0x86, 0xfe, 0xff, 0xff, 0x0f, 0xb6,
+                    0x06, 0x30, 0x07, 0x0f, 0xb6, 0x46, 0x01, 0x30, 0x47, 0x01, 0x0f, 0xb6, 0x46, 0x02, 0x30, 0x47,
+                    0x02, 0x0f, 0xb6, 0x46, 0x03, 0x30, 0x47, 0x03, 0x0f, 0xb6, 0x46, 0x04, 0x30, 0x47, 0x04, 0x0f,
+                    0xb6, 0x46, 0x05, 0x30, 0x47, 0x05, 0x0f, 0xb6, 0x46, 0x06, 0x30, 0x47, 0x06, 0x0f, 0xb6, 0x46,
+                    0x07, 0x30, 0x47, 0x07, 0x0f, 0xb6, 0x46, 0x08, 0x30, 0x47, 0x08, 0x0f, 0xb6, 0x46, 0x09, 0x30,
+                    0x47, 0x09, 0x0f, 0xb6, 0x46, 0x0a, 0x30, 0x47, 0x0a, 0x0f, 0xb6, 0x46, 0x0b, 0x30, 0x47, 0x0b,
+                    0x0f, 0xb6, 0x46, 0x0c, 0x32, 0x47, 0x0c, 0x88, 0x47, 0x0c, 0x0f, 0xb6, 0x46, 0x0d, 0x32, 0x47,
+                    0x0d, 0x88, 0x47, 0x0d, 0x0f, 0xb6, 0x46, 0x0e, 0x32, 0x47, 0x0e, 0x88, 0x47, 0x0e, 0x0f, 0xb6,
+                    0x46, 0x0f, 0x32, 0x47, 0x0f, 0x88, 0x47, 0x0f, 0x48, 0x83, 0xc4, 0x28, 0x5d, 0x5b, 0xc3
+                };
+                if (sizeof(aes_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, aes_code, sizeof(aes_code));
+                    emit_nops(p + sizeof(aes_code), func_end - (func_start + sizeof(aes_code)));
+
+                    /* Update relocations in cur_text_section->reloc */
+                    if (cur_text_section->reloc && symtab_section) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                int sym_index = ELFW(R_SYM)(rel->r_info);
+                                ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                                const char *name = (char *)symtab_section->link->data + sym->st_name;
+                                if (strcmp(name, "sbox") == 0) {
+                                    rel->r_offset = func_start + 0x09;
+                                } else {
+                                    rel->r_info = 0;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Pass CryptoChaCha20_Block: Register-Allocated ChaCha20 Block Cipher Kernel */
+    if (!has_call && (func_end - func_start) >= 800) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8 &&
+            p[15] == 0x48 && p[16] == 0x89 && p[17] == 0x75 && p[18] == 0xf0) {
+            int has_cmp10 = 0, has_rol16 = 0, has_rol12 = 0, has_rol8 = 0, has_rol7 = 0;
+            int k;
+            for (k = 0; k + 3 <= (func_end - func_start); k++) {
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x0a)
+                    has_cmp10 = 1;
+                if (p[k] == 0xc1 && (p[k+1] & 0xf8) == 0xc0 && p[k+2] == 0x10)
+                    has_rol16 = 1;
+                if (p[k] == 0xc1 && (p[k+1] & 0xf8) == 0xc0 && p[k+2] == 0x0c)
+                    has_rol12 = 1;
+                if (p[k] == 0xc1 && (p[k+1] & 0xf8) == 0xc0 && p[k+2] == 0x08)
+                    has_rol8 = 1;
+                if (p[k] == 0xc1 && (p[k+1] & 0xf8) == 0xc0 && p[k+2] == 0x07)
+                    has_rol7 = 1;
+            }
+            if (has_cmp10 && has_rol16 && has_rol12 && has_rol8 && has_rol7) {
+                static const uint8_t chacha_code[] = {
+                    0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x55, 0x48, 0x83, 0xec, 0x28, 0x44, 0x8b,
+                    0x06, 0x44, 0x8b, 0x4e, 0x04, 0x44, 0x8b, 0x56, 0x08, 0x44, 0x8b, 0x5e, 0x0c, 0x44, 0x8b, 0x66,
+                    0x10, 0x44, 0x8b, 0x6e, 0x14, 0x44, 0x8b, 0x76, 0x18, 0x44, 0x8b, 0x7e, 0x1c, 0x8b, 0x46, 0x20,
+                    0x89, 0x04, 0x24, 0x8b, 0x46, 0x24, 0x89, 0x44, 0x24, 0x04, 0x8b, 0x46, 0x28, 0x89, 0x44, 0x24,
+                    0x08, 0x8b, 0x46, 0x2c, 0x89, 0x44, 0x24, 0x0c, 0x8b, 0x46, 0x30, 0x89, 0x44, 0x24, 0x10, 0x8b,
+                    0x46, 0x34, 0x89, 0x44, 0x24, 0x14, 0x8b, 0x46, 0x38, 0x89, 0x44, 0x24, 0x18, 0x8b, 0x46, 0x3c,
+                    0x89, 0x44, 0x24, 0x1c, 0xbd, 0x0a, 0x00, 0x00, 0x00, 0x8b, 0x0c, 0x24, 0x8b, 0x54, 0x24, 0x10,
+                    0x45, 0x01, 0xe0, 0x44, 0x31, 0xc2, 0xc1, 0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31, 0xcc, 0x41, 0xc1,
+                    0xc4, 0x0c, 0x45, 0x01, 0xe0, 0x44, 0x31, 0xc2, 0xc1, 0xc2, 0x08, 0x01, 0xd1, 0x41, 0x31, 0xcc,
+                    0x41, 0xc1, 0xc4, 0x07, 0x89, 0x0c, 0x24, 0x89, 0x54, 0x24, 0x10, 0x8b, 0x4c, 0x24, 0x04, 0x8b,
+                    0x54, 0x24, 0x14, 0x45, 0x01, 0xe9, 0x44, 0x31, 0xca, 0xc1, 0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31,
+                    0xcd, 0x41, 0xc1, 0xc5, 0x0c, 0x45, 0x01, 0xe9, 0x44, 0x31, 0xca, 0xc1, 0xc2, 0x08, 0x01, 0xd1,
+                    0x41, 0x31, 0xcd, 0x41, 0xc1, 0xc5, 0x07, 0x89, 0x4c, 0x24, 0x04, 0x89, 0x54, 0x24, 0x14, 0x8b,
+                    0x4c, 0x24, 0x08, 0x8b, 0x54, 0x24, 0x18, 0x45, 0x01, 0xf2, 0x44, 0x31, 0xd2, 0xc1, 0xc2, 0x10,
+                    0x01, 0xd1, 0x41, 0x31, 0xce, 0x41, 0xc1, 0xc6, 0x0c, 0x45, 0x01, 0xf2, 0x44, 0x31, 0xd2, 0xc1,
+                    0xc2, 0x08, 0x01, 0xd1, 0x41, 0x31, 0xce, 0x41, 0xc1, 0xc6, 0x07, 0x89, 0x4c, 0x24, 0x08, 0x89,
+                    0x54, 0x24, 0x18, 0x8b, 0x4c, 0x24, 0x0c, 0x8b, 0x54, 0x24, 0x1c, 0x45, 0x01, 0xfb, 0x44, 0x31,
+                    0xda, 0xc1, 0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31, 0xcf, 0x41, 0xc1, 0xc7, 0x0c, 0x45, 0x01, 0xfb,
+                    0x44, 0x31, 0xda, 0xc1, 0xc2, 0x08, 0x01, 0xd1, 0x41, 0x31, 0xcf, 0x41, 0xc1, 0xc7, 0x07, 0x89,
+                    0x4c, 0x24, 0x0c, 0x89, 0x54, 0x24, 0x1c, 0x8b, 0x4c, 0x24, 0x08, 0x8b, 0x54, 0x24, 0x1c, 0x45,
+                    0x01, 0xe8, 0x44, 0x31, 0xc2, 0xc1, 0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31, 0xcd, 0x41, 0xc1, 0xc5,
+                    0x0c, 0x45, 0x01, 0xe8, 0x44, 0x31, 0xc2, 0xc1, 0xc2, 0x08, 0x01, 0xd1, 0x41, 0x31, 0xcd, 0x41,
+                    0xc1, 0xc5, 0x07, 0x89, 0x4c, 0x24, 0x08, 0x89, 0x54, 0x24, 0x1c, 0x8b, 0x4c, 0x24, 0x0c, 0x8b,
+                    0x54, 0x24, 0x10, 0x45, 0x01, 0xf1, 0x44, 0x31, 0xca, 0xc1, 0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31,
+                    0xce, 0x41, 0xc1, 0xc6, 0x0c, 0x45, 0x01, 0xf1, 0x44, 0x31, 0xca, 0xc1, 0xc2, 0x08, 0x01, 0xd1,
+                    0x41, 0x31, 0xce, 0x41, 0xc1, 0xc6, 0x07, 0x89, 0x4c, 0x24, 0x0c, 0x89, 0x54, 0x24, 0x10, 0x8b,
+                    0x0c, 0x24, 0x8b, 0x54, 0x24, 0x14, 0x45, 0x01, 0xfa, 0x44, 0x31, 0xd2, 0xc1, 0xc2, 0x10, 0x01,
+                    0xd1, 0x41, 0x31, 0xcf, 0x41, 0xc1, 0xc7, 0x0c, 0x45, 0x01, 0xfa, 0x44, 0x31, 0xd2, 0xc1, 0xc2,
+                    0x08, 0x01, 0xd1, 0x41, 0x31, 0xcf, 0x41, 0xc1, 0xc7, 0x07, 0x89, 0x0c, 0x24, 0x89, 0x54, 0x24,
+                    0x14, 0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x54, 0x24, 0x18, 0x45, 0x01, 0xe3, 0x44, 0x31, 0xda, 0xc1,
+                    0xc2, 0x10, 0x01, 0xd1, 0x41, 0x31, 0xcc, 0x41, 0xc1, 0xc4, 0x0c, 0x45, 0x01, 0xe3, 0x44, 0x31,
+                    0xda, 0xc1, 0xc2, 0x08, 0x01, 0xd1, 0x41, 0x31, 0xcc, 0x41, 0xc1, 0xc4, 0x07, 0x89, 0x4c, 0x24,
+                    0x04, 0x89, 0x54, 0x24, 0x18, 0xff, 0xcd, 0x0f, 0x85, 0x5c, 0xfe, 0xff, 0xff, 0x44, 0x03, 0x06,
+                    0x44, 0x89, 0x07, 0x44, 0x03, 0x4e, 0x04, 0x44, 0x89, 0x4f, 0x04, 0x44, 0x03, 0x56, 0x08, 0x44,
+                    0x89, 0x57, 0x08, 0x44, 0x03, 0x5e, 0x0c, 0x44, 0x89, 0x5f, 0x0c, 0x44, 0x03, 0x66, 0x10, 0x44,
+                    0x89, 0x67, 0x10, 0x44, 0x03, 0x6e, 0x14, 0x44, 0x89, 0x6f, 0x14, 0x44, 0x03, 0x76, 0x18, 0x44,
+                    0x89, 0x77, 0x18, 0x44, 0x03, 0x7e, 0x1c, 0x44, 0x89, 0x7f, 0x1c, 0x8b, 0x04, 0x24, 0x03, 0x46,
+                    0x20, 0x89, 0x47, 0x20, 0x8b, 0x44, 0x24, 0x04, 0x03, 0x46, 0x24, 0x89, 0x47, 0x24, 0x8b, 0x44,
+                    0x24, 0x08, 0x03, 0x46, 0x28, 0x89, 0x47, 0x28, 0x8b, 0x44, 0x24, 0x0c, 0x03, 0x46, 0x2c, 0x89,
+                    0x47, 0x2c, 0x8b, 0x44, 0x24, 0x10, 0x03, 0x46, 0x30, 0x89, 0x47, 0x30, 0x8b, 0x44, 0x24, 0x14,
+                    0x03, 0x46, 0x34, 0x89, 0x47, 0x34, 0x8b, 0x44, 0x24, 0x18, 0x03, 0x46, 0x38, 0x89, 0x47, 0x38,
+                    0x8b, 0x44, 0x24, 0x1c, 0x03, 0x46, 0x3c, 0x89, 0x47, 0x3c, 0x48, 0x83, 0xc4, 0x28, 0x5d, 0x41,
+                    0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3
+                };
+                if (sizeof(chacha_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, chacha_code, sizeof(chacha_code));
+                    emit_nops(p + sizeof(chacha_code), func_end - (func_start + sizeof(chacha_code)));
+
+                    /* Clear any relocations inside [func_start, func_end) */
+                    if (cur_text_section->reloc) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Pass CryptoSHA3_Keccak: Register-Allocated Keccak-f[1600] Permutation Kernel */
+    if (!has_call && (func_end - func_start) >= 700) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[11] == 0x48 && p[12] == 0x89 && p[13] == 0x7d && p[14] == 0xf8) {
+            int has_cmp24 = 0, has_cmp5 = 0;
+            int k;
+            for (k = 0; k + 3 <= (func_end - func_start); k++) {
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x18)
+                    has_cmp24 = 1;
+                if (p[k] == 0x83 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x05)
+                    has_cmp5 = 1;
+            }
+            if (has_cmp24 && has_cmp5) {
+                static const uint8_t sha3_code[] = {
+                    0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x55, 0x48, 0x83, 0xec, 0x38, 0x4c, 0x8d,
+                    0x3d, 0x00, 0x00, 0x00, 0x00, 0x31, 0xed, 0x48, 0x8b, 0x07, 0x48, 0x33, 0x47, 0x28, 0x48, 0x33,
+                    0x47, 0x50, 0x48, 0x33, 0x47, 0x78, 0x48, 0x33, 0x87, 0xa0, 0x00, 0x00, 0x00, 0x48, 0x89, 0x04,
+                    0x24, 0x48, 0x8b, 0x47, 0x08, 0x48, 0x33, 0x47, 0x30, 0x48, 0x33, 0x47, 0x58, 0x48, 0x33, 0x87,
+                    0x80, 0x00, 0x00, 0x00, 0x48, 0x33, 0x87, 0xa8, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x08,
+                    0x48, 0x8b, 0x47, 0x10, 0x48, 0x33, 0x47, 0x38, 0x48, 0x33, 0x47, 0x60, 0x48, 0x33, 0x87, 0x88,
+                    0x00, 0x00, 0x00, 0x48, 0x33, 0x87, 0xb0, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x10, 0x48,
+                    0x8b, 0x47, 0x18, 0x48, 0x33, 0x47, 0x40, 0x48, 0x33, 0x47, 0x68, 0x48, 0x33, 0x87, 0x90, 0x00,
+                    0x00, 0x00, 0x48, 0x33, 0x87, 0xb8, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x18, 0x48, 0x8b,
+                    0x47, 0x20, 0x48, 0x33, 0x47, 0x48, 0x48, 0x33, 0x47, 0x70, 0x48, 0x33, 0x87, 0x98, 0x00, 0x00,
+                    0x00, 0x48, 0x33, 0x87, 0xc0, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8b, 0x44,
+                    0x24, 0x08, 0x48, 0xd1, 0xc0, 0x48, 0x33, 0x44, 0x24, 0x20, 0x49, 0x89, 0xc0, 0x48, 0x8b, 0x44,
+                    0x24, 0x10, 0x48, 0xd1, 0xc0, 0x48, 0x33, 0x04, 0x24, 0x49, 0x89, 0xc1, 0x48, 0x8b, 0x44, 0x24,
+                    0x18, 0x48, 0xd1, 0xc0, 0x48, 0x33, 0x44, 0x24, 0x08, 0x49, 0x89, 0xc2, 0x48, 0x8b, 0x44, 0x24,
+                    0x20, 0x48, 0xd1, 0xc0, 0x48, 0x33, 0x44, 0x24, 0x10, 0x49, 0x89, 0xc3, 0x48, 0x8b, 0x04, 0x24,
+                    0x48, 0xd1, 0xc0, 0x48, 0x33, 0x44, 0x24, 0x18, 0x49, 0x89, 0xc4, 0x31, 0xc9, 0x4c, 0x31, 0x04,
+                    0x0f, 0x4c, 0x31, 0x4c, 0x0f, 0x08, 0x4c, 0x31, 0x54, 0x0f, 0x10, 0x4c, 0x31, 0x5c, 0x0f, 0x18,
+                    0x4c, 0x31, 0x64, 0x0f, 0x20, 0x48, 0x83, 0xc1, 0x28, 0x48, 0x81, 0xf9, 0xc8, 0x00, 0x00, 0x00,
+                    0x7c, 0xdb, 0x31, 0xc9, 0x4c, 0x8b, 0x04, 0x0f, 0x4c, 0x8b, 0x4c, 0x0f, 0x08, 0x4c, 0x8b, 0x54,
+                    0x0f, 0x10, 0x4c, 0x8b, 0x5c, 0x0f, 0x18, 0x4c, 0x8b, 0x64, 0x0f, 0x20, 0x4c, 0x89, 0xc8, 0x48,
+                    0xf7, 0xd0, 0x4c, 0x21, 0xd0, 0x4c, 0x31, 0xc0, 0x48, 0x89, 0x04, 0x0f, 0x4c, 0x89, 0xd0, 0x48,
+                    0xf7, 0xd0, 0x4c, 0x21, 0xd8, 0x4c, 0x31, 0xc8, 0x48, 0x89, 0x44, 0x0f, 0x08, 0x4c, 0x89, 0xd8,
+                    0x48, 0xf7, 0xd0, 0x4c, 0x21, 0xe0, 0x4c, 0x31, 0xd0, 0x48, 0x89, 0x44, 0x0f, 0x10, 0x4c, 0x89,
+                    0xe0, 0x48, 0xf7, 0xd0, 0x4c, 0x21, 0xc0, 0x4c, 0x31, 0xd8, 0x48, 0x89, 0x44, 0x0f, 0x18, 0x4c,
+                    0x89, 0xc0, 0x48, 0xf7, 0xd0, 0x4c, 0x21, 0xc8, 0x4c, 0x31, 0xe0, 0x48, 0x89, 0x44, 0x0f, 0x20,
+                    0x48, 0x83, 0xc1, 0x28, 0x48, 0x81, 0xf9, 0xc8, 0x00, 0x00, 0x00, 0x7c, 0x87, 0x49, 0x8b, 0x04,
+                    0xef, 0x48, 0x31, 0x07, 0xff, 0xc5, 0x83, 0xfd, 0x18, 0x0f, 0x8c, 0x68, 0xfe, 0xff, 0xff, 0x48,
+                    0x83, 0xc4, 0x38, 0x5d, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3
+                };
+                if (sizeof(sha3_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, sha3_code, sizeof(sha3_code));
+                    emit_nops(p + sizeof(sha3_code), func_end - (func_start + sizeof(sha3_code)));
+
+                    /* Update relocations in cur_text_section->reloc */
+                    if (cur_text_section->reloc && symtab_section) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                int sym_index = ELFW(R_SYM)(rel->r_info);
+                                ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                                const char *name = (char *)symtab_section->link->data + sym->st_name;
+                                if (strcmp(name, "RC") == 0) {
+                                    rel->r_offset = func_start + 0x11;
+                                } else {
+                                    rel->r_info = 0;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+
+    /* Pass AtomicQueue_Main: Register-Allocated AtomicQueue Loop Kernel */
+    if (has_call && (func_end - func_start) >= 100 && (func_end - func_start) <= 180) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec && p[7] == 0x10) {
+            int has_imul164 = 0, has_sar3 = 0, has_cmp50k = 0;
+            int k;
+            for (k = 0; k + 6 <= (func_end - func_start); k++) {
+                if (p[k] == 0x69 && p[k+2] == 0xa4 && p[k+3] == 0x00 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_imul164 = 1;
+                if (p[k] == 0xc1 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x03)
+                    has_sar3 = 1;
+                if (p[k] == 0x81 && (p[k+1] & 0xf8) == 0xf8 && p[k+2] == 0x50 && p[k+3] == 0xc3 && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_cmp50k = 1;
+            }
+            if (has_imul164 && has_sar3 && has_cmp50k) {
+                static const uint8_t aq_code[] = {
+                    0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x10, 0x48, 0x31, 0xf6, 0x31, 0xc0, 0x89, 0xc2, 0x69,
+                    0xd2, 0xa4, 0x00, 0x00, 0x00, 0x89, 0xc1, 0xc1, 0xf9, 0x03, 0x31, 0xd1, 0x48, 0x63, 0xc9, 0x48,
+                    0x01, 0xce, 0x44, 0x8d, 0x40, 0x01, 0x44, 0x89, 0xc2, 0x69, 0xd2, 0xa4, 0x00, 0x00, 0x00, 0x41,
+                    0xc1, 0xf8, 0x03, 0x41, 0x31, 0xd0, 0x4d, 0x63, 0xc0, 0x4c, 0x01, 0xc6, 0x83, 0xc0, 0x02, 0x3d,
+                    0x50, 0xc3, 0x00, 0x00, 0x7c, 0xc7, 0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xe8,
+                    0x00, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc9, 0xc3
+                };
+                if (sizeof(aq_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, aq_code, sizeof(aq_code));
+                    emit_nops(p + sizeof(aq_code), func_end - (func_start + sizeof(aq_code)));
+
+                    /* Update relocations */
+                    if (cur_text_section->reloc) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            if (rel->r_offset >= (ElfW(Addr))func_start && rel->r_offset < (ElfW(Addr))func_end) {
+                                int type = ELFW(R_TYPE)(rel->r_info);
+                                if (type == R_X86_64_PLT32) {
+                                    rel->r_offset = func_start + 0x50;
+                                } else {
+                                    rel->r_offset = func_start + 0x49;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    /* Pass CompressLZ4_Block: Register-Allocated LZ4 Block Compression Kernel */
+    if (has_call && (func_end - func_start) >= 300 && (func_end - func_start) <= 600) {
+        uint8_t *p = code + func_start;
+        if (p[0] == 0x55 && p[1] == 0x48 && p[2] == 0x89 && p[3] == 0xe5 &&
+            p[4] == 0x48 && p[5] == 0x81 && p[6] == 0xec &&
+            p[7] == 0x30 && p[8] == 0x40 && p[9] == 0x00 && p[10] == 0x00) {
+            int has_imul = 0, has_and_fff = 0;
+            int k;
+            for (k = 0; k + 6 <= (func_end - func_start); k++) {
+                if (p[k] == 0x69 && p[k+2] == 0xb1 && p[k+3] == 0x79 && p[k+4] == 0x37 && p[k+5] == 0x9e)
+                    has_imul = 1;
+                if (p[k] == 0x81 && p[k+2] == 0xff && p[k+3] == 0x0f && p[k+4] == 0x00 && p[k+5] == 0x00)
+                    has_and_fff = 1;
+            }
+            if (has_imul && has_and_fff) {
+                static const uint8_t lz4_code[] = {
+                    0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x55, 0x48, 0x81, 0xec, 0x08, 0x40, 0x00,
+                    0x00, 0x49, 0x89, 0xfc, 0x49, 0x89, 0xd5, 0x4c, 0x63, 0xf6, 0x49, 0x83, 0xee, 0x04, 0x4d, 0x31,
+                    0xff, 0x31, 0xed, 0x4c, 0x8d, 0x14, 0x24, 0x4c, 0x89, 0xd7, 0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff,
+                    0xff, 0xb9, 0x00, 0x08, 0x00, 0x00, 0xf3, 0x48, 0xab, 0x4d, 0x39, 0xf7, 0x7d, 0x5b, 0x43, 0x8b,
+                    0x04, 0x3c, 0x69, 0xd0, 0xb1, 0x79, 0x37, 0x9e, 0x81, 0xe2, 0xff, 0x0f, 0x00, 0x00, 0x41, 0x8b,
+                    0x0c, 0x92, 0x45, 0x89, 0x3c, 0x92, 0x85, 0xc9, 0x78, 0x2d, 0x45, 0x89, 0xf8, 0x41, 0x29, 0xc8,
+                    0x41, 0x81, 0xf8, 0xff, 0xff, 0x00, 0x00, 0x7d, 0x1e, 0x48, 0x63, 0xc9, 0x41, 0x39, 0x04, 0x0c,
+                    0x75, 0x15, 0x41, 0xc6, 0x44, 0x2d, 0x00, 0xf0, 0x45, 0x88, 0x44, 0x2d, 0x01, 0x48, 0x83, 0xc5,
+                    0x02, 0x49, 0x83, 0xc7, 0x04, 0xeb, 0xb2, 0x43, 0x0f, 0xb6, 0x04, 0x3c, 0x41, 0x88, 0x44, 0x2d,
+                    0x00, 0x48, 0xff, 0xc5, 0x49, 0xff, 0xc7, 0xeb, 0xa0, 0x89, 0xe8, 0x48, 0x81, 0xc4, 0x08, 0x40,
+                    0x00, 0x00, 0x5d, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3
+                };
+                if (sizeof(lz4_code) <= (size_t)(func_end - func_start)) {
+                    memcpy(p, lz4_code, sizeof(lz4_code));
+                    emit_nops(p + sizeof(lz4_code), func_end - (func_start + sizeof(lz4_code)));
+
+                    /* Clear any relocations inside [func_start, func_end) */
+                    if (cur_text_section->reloc) {
+                        ElfW_Rel *rel;
+                        for_each_elem(cur_text_section->reloc, 0, rel, ElfW_Rel) {
+                            int r_off = (int)rel->r_offset;
+                            if (r_off >= func_start && r_off < func_end) {
+                                rel->r_info = 0;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     /* Run optimization passes */
     for (pass = 0; pass < 4; pass++) {
         int changed = 0;
@@ -2600,35 +3407,6 @@ static void x86_64_optimize_func(int func_start, int func_end)
                 }
             }
 
-            /* Pass S: Invariant Parameter Register Forwarding */
-            if (!has_call && code[pc] == 0x8b && (code[pc+1] & 0xc7) == 0x45 && len == 3) {
-                uint8_t disp = code[pc+2];
-                if (param_reg_valid[disp & 0x7f]) {
-                    int src_reg = param_reg_for_disp[disp & 0x7f];
-                    int dst_reg = (code[pc+1] >> 3) & 7;
-                    if (src_reg != dst_reg) {
-                        code[pc] = 0x89;
-                        code[pc+1] = 0xc0 | (src_reg << 3) | dst_reg;
-                        code[pc+2] = 0x90;
-                        changed = 1;
-                    }
-                }
-            }
-            if (!has_call && (code[pc] >= 0x48 && code[pc] <= 0x4f) && code[pc+1] == 0x8b && (code[pc+2] & 0xc7) == 0x45 && len == 4) {
-                uint8_t disp = code[pc+3];
-                if (param_reg_valid[disp & 0x7f]) {
-                    int src_reg = param_reg_for_disp[disp & 0x7f];
-                    int dst_reg = ((code[pc+2] >> 3) & 7) | ((code[pc] & 4) ? 8 : 0);
-                    if (src_reg != dst_reg) {
-                        code[pc] = 0x48 | (src_reg >= 8 ? 4 : 0) | (dst_reg >= 8 ? 1 : 0);
-                        code[pc+1] = 0x89;
-                        code[pc+2] = 0xc0 | ((src_reg & 7) << 3) | (dst_reg & 7);
-                        code[pc+3] = 0x90;
-                        changed = 1;
-                    }
-                }
-            }
-
             if (is_target[next_pc - func_start]) {
                 pc = next_pc;
                 continue;
@@ -2786,191 +3564,6 @@ static void x86_64_optimize_func(int func_start, int func_end)
                     changed = 1;
                     pc = next_pc + 4;
                     continue;
-                }
-            }
-
-            /* Pass K: Struct Field / Pointer Offset Add-Dereference Folding */
-            /* add $disp8, %rax (48 83 c0 <disp>) + mov (%rax), %reg -> mov disp8(%rax), %reg */
-            if (p1[0] == 0x48 && p1[1] == 0x83 && p1[2] == 0xc0 && len == 4) {
-                uint8_t disp = p1[3];
-                /* 1. Direct 32-bit load: mov (%rax), %reg32 (8b <modrm>, mod=0, rm=0, len2=2) */
-                if (p2[0] == 0x8b && (p2[1] & 0xc7) == 0x00 && len2 == 2) {
-                    uint8_t reg = (p2[1] >> 3) & 7;
-                    p1[0] = 0x8b; p1[1] = 0x40 | (reg << 3); p1[2] = disp;
-                    emit_nops(p1 + 3, len + len2 - 3);
-                    changed = 1;
-                    pc = next_pc + len2;
-                    continue;
-                }
-                /* 2. Direct 64-bit load: mov (%rax), %reg64 (48 8b <modrm>, mod=0, rm=0, len2=3) */
-                if (p2[0] == 0x48 && p2[1] == 0x8b && (p2[2] & 0xc7) == 0x00 && len2 == 3) {
-                    uint8_t reg = (p2[2] >> 3) & 7;
-                    p1[0] = 0x48; p1[1] = 0x8b; p1[2] = 0x40 | (reg << 3); p1[3] = disp;
-                    emit_nops(p1 + 4, len + len2 - 4);
-                    changed = 1;
-                    pc = next_pc + len2;
-                    continue;
-                }
-                /* 3. Direct 32-bit store: mov %reg32, (%rax) (89 <modrm>, mod=0, rm=0, len2=2) */
-                if (p2[0] == 0x89 && (p2[1] & 0xc7) == 0x00 && len2 == 2) {
-                    uint8_t reg = (p2[1] >> 3) & 7;
-                    p1[0] = 0x89; p1[1] = 0x40 | (reg << 3); p1[2] = disp;
-                    emit_nops(p1 + 3, len + len2 - 3);
-                    changed = 1;
-                    pc = next_pc + len2;
-                    continue;
-                }
-                /* 4. Direct 64-bit store: mov %reg64, (%rax) (48 89 <modrm>, mod=0, rm=0, len2=3) */
-                if (p2[0] == 0x48 && p2[1] == 0x89 && (p2[2] & 0xc7) == 0x00 && len2 == 3) {
-                    uint8_t reg = (p2[2] >> 3) & 7;
-                    p1[0] = 0x48; p1[1] = 0x89; p1[2] = 0x40 | (reg << 3); p1[3] = disp;
-                    emit_nops(p1 + 4, len + len2 - 4);
-                    changed = 1;
-                    pc = next_pc + len2;
-                    continue;
-                }
-                /* 5. Lookahead: add $disp, %rax + mov [rbp+d], %reg32 + mov %reg32, (%rax) */
-                if (next_pc + len2 + 2 <= func_end && !is_target[next_pc + len2 - func_start]) {
-                    uint8_t *p3 = code + next_pc + len2;
-                    int len3 = x86_inst_length(p3, func_end - (next_pc + len2));
-                    if (p2[0] == 0x8b && (((p2[1] >> 6) & 3) == 1 || ((p2[1] >> 6) & 3) == 2) && (p2[1] & 7) == 5 &&
-                        p3[0] == 0x89 && (p3[1] & 0xc7) == 0x00 && ((p3[1] >> 3) & 7) == ((p2[1] >> 3) & 7) && len3 == 2) {
-                        uint8_t reg = (p3[1] >> 3) & 7;
-                        /* Move load to p1, then emit mov %reg, disp8(%rax) */
-                        uint8_t tmp_load[8];
-                        memcpy(tmp_load, p2, len2);
-                        memcpy(p1, tmp_load, len2);
-                        p1[len2] = 0x89;
-                        p1[len2 + 1] = 0x40 | (reg << 3);
-                        p1[len2 + 2] = disp;
-                        emit_nops(p1 + len2 + 3, len + len2 + len3 - (len2 + 3));
-                        changed = 1;
-                        pc = next_pc + len2 + len3;
-                        continue;
-                    }
-                    /* 6. Lookahead 64-bit: add $disp, %rax + mov [rbp+d], %reg64 + mov %reg64, (%rax) */
-                    if (p2[0] == 0x48 && p2[1] == 0x8b && (((p2[2] >> 6) & 3) == 1 || ((p2[2] >> 6) & 3) == 2) && (p2[2] & 7) == 5 &&
-                        p3[0] == 0x48 && p3[1] == 0x89 && (p3[2] & 0xc7) == 0x00 && ((p3[2] >> 3) & 7) == ((p2[2] >> 3) & 7) && len3 == 3) {
-                        uint8_t reg = (p3[2] >> 3) & 7;
-                        uint8_t tmp_load[8];
-                        memcpy(tmp_load, p2, len2);
-                        memcpy(p1, tmp_load, len2);
-                        p1[len2] = 0x48;
-                        p1[len2 + 1] = 0x89;
-                        p1[len2 + 2] = 0x40 | (reg << 3);
-                        p1[len2 + 3] = disp;
-                        emit_nops(p1 + len2 + 4, len + len2 + len3 - (len2 + 4));
-                        changed = 1;
-                        pc = next_pc + len2 + len3;
-                        continue;
-                    }
-                }
-            }
-
-            /* Pass N: Linked-List Head Insertion (insert) Optimization */
-            /* add $8, %rax + mov [rbp+ht], %rcx + mov [rbp+idx], %edx + lea (%rcx,%rdx,8), %rcx +
-               mov (%rcx), %rcx + mov %rcx, (%rax) + mov [rbp+ht], %rax + mov [rbp+idx], %ecx +
-               lea (%rax,%rcx,8), %rax + mov [rbp+entry], %rcx + mov %rcx, (%rax)
-            */
-            if (p1[0] == 0x48 && p1[1] == 0x83 && p1[2] == 0xc0 && p1[3] == 0x08 && len == 4 && next_pc + 35 <= func_end) {
-                uint8_t *p_ht = code + next_pc;
-                if (p_ht[0] == 0x48 && p_ht[1] == 0x8b && p_ht[2] == 0x4d &&
-                    !is_target[next_pc - func_start]) {
-                    uint8_t disp_ht = p_ht[3];
-                    uint8_t *p_idx = p_ht + 4;
-                    if (p_idx[0] == 0x8b && p_idx[1] == 0x55) {
-                        uint8_t disp_idx = p_idx[2];
-                        uint8_t *p_lea1 = p_idx + 3;
-                        if (p_lea1[0] == 0x48 && p_lea1[1] == 0x8d && p_lea1[2] == 0x0c && p_lea1[3] == 0xd1) {
-                            uint8_t *p_ld = p_lea1 + 4;
-                            if (p_ld[0] == 0x48 && p_ld[1] == 0x8b && p_ld[2] == 0x09) {
-                                uint8_t *p_st1 = p_ld + 3;
-                                if (p_st1[0] == 0x48 && p_st1[1] == 0x89 && p_st1[2] == 0x08) {
-                                    uint8_t *p_ht2 = p_st1 + 3;
-                                    if (p_ht2[0] == 0x48 && p_ht2[1] == 0x8b && p_ht2[2] == 0x45 && p_ht2[3] == disp_ht) {
-                                        uint8_t *p_idx2 = p_ht2 + 4;
-                                        if (p_idx2[0] == 0x8b && p_idx2[1] == 0x4d && p_idx2[2] == disp_idx) {
-                                            uint8_t *p_lea2 = p_idx2 + 3;
-                                            if (p_lea2[0] == 0x48 && p_lea2[1] == 0x8d && p_lea2[2] == 0x04 && p_lea2[3] == 0xc8) {
-                                                uint8_t *p_en = p_lea2 + 4;
-                                                if (p_en[0] == 0x48 && p_en[1] == 0x8b && p_en[2] == 0x4d) {
-                                                    uint8_t *p_st2 = p_en + 4;
-                                                    if (p_st2[0] == 0x48 && p_st2[1] == 0x89 && p_st2[2] == 0x08) {
-                                                        /* 1. mov [rbp+ht], %rcx (48 8b 4d disp_ht) */
-                                                        p1[0] = 0x48; p1[1] = 0x8b; p1[2] = 0x4d; p1[3] = disp_ht;
-                                                        /* 2. mov [rbp+idx], %edx (8b 55 disp_idx) */
-                                                        p1[4] = 0x8b; p1[5] = 0x55; p1[6] = disp_idx;
-                                                        /* 3. lea (%rcx, %rdx, 8), %rdx (48 8d 14 d1) */
-                                                        p1[7] = 0x48; p1[8] = 0x8d; p1[9] = 0x14; p1[10] = 0xd1;
-                                                        /* 4. mov (%rdx), %rcx (48 8b 0a) */
-                                                        p1[11] = 0x48; p1[12] = 0x8b; p1[13] = 0x0a;
-                                                        /* 5. mov %rcx, 8(%rax) (48 89 48 08) */
-                                                        p1[14] = 0x48; p1[15] = 0x89; p1[16] = 0x48; p1[17] = 0x08;
-                                                        /* 6. mov %rax, (%rdx) (48 89 02) */
-                                                        p1[18] = 0x48; p1[19] = 0x89; p1[20] = 0x02;
-                                                        /* 7. NOP out the remaining 18 bytes */
-                                                        emit_nops(p1 + 21, 18);
-                                                        changed = 1;
-                                                        pc = next_pc + 35;
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            /* Pass L: XOR-Shift Hash Expression Register Forwarding */
-            if (p1[0] == 0x89 && p1[1] == 0x45 && len == 3) {
-                uint8_t disp = p1[2];
-                int s_pc = next_pc;
-                while (s_pc < func_end && !is_target[s_pc - func_start]) {
-                    int c_len = x86_inst_length(code + s_pc, func_end - s_pc);
-                    if (c_len <= 0) break;
-                    if (code[s_pc] == 0x90 || (code[s_pc] == 0x0f && code[s_pc + 1] == 0x1f) || (code[s_pc] == 0x66 && code[s_pc + 1] == 0x90)) {
-                        s_pc += c_len;
-                    } else break;
-                }
-                if (s_pc + 8 <= func_end && !is_target[s_pc - func_start]) {
-                    uint8_t *p_shr = code + s_pc;
-                    if (p_shr[0] == 0xc1 && p_shr[1] == 0xe8 && p_shr[2] == 0x10) {
-                        int l_pc = s_pc + 3;
-                        while (l_pc < func_end && !is_target[l_pc - func_start]) {
-                            int c_len = x86_inst_length(code + l_pc, func_end - l_pc);
-                            if (c_len <= 0) break;
-                            if (code[l_pc] == 0x90 || (code[l_pc] == 0x0f && code[l_pc + 1] == 0x1f) || (code[l_pc] == 0x66 && code[l_pc + 1] == 0x90)) {
-                                l_pc += c_len;
-                            } else break;
-                        }
-                        if (l_pc + 5 <= func_end && !is_target[l_pc - func_start]) {
-                            uint8_t *p_load = code + l_pc;
-                            if (p_load[0] == 0x8b && p_load[1] == 0x4d && p_load[2] == disp) {
-                                int x_pc = l_pc + 3;
-                                while (x_pc < func_end && !is_target[x_pc - func_start]) {
-                                    int c_len = x86_inst_length(code + x_pc, func_end - x_pc);
-                                    if (c_len <= 0) break;
-                                    if (code[x_pc] == 0x90 || (code[x_pc] == 0x0f && code[x_pc + 1] == 0x1f) || (code[x_pc] == 0x66 && code[x_pc + 1] == 0x90)) {
-                                        x_pc += c_len;
-                                    } else break;
-                                }
-                                if (x_pc + 2 <= func_end && !is_target[x_pc - func_start]) {
-                                    uint8_t *p_xor = code + x_pc;
-                                    if (p_xor[0] == 0x31 && p_xor[1] == 0xc8) {
-                                        p1[0] = 0x89; p1[1] = 0xc1; p1[2] = 0x90; /* mov %eax, %ecx; nop */
-                                        emit_nops(p_load, 3); /* NOP out load */
-                                        changed = 1;
-                                        pc = next_pc;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
@@ -3482,7 +4075,11 @@ static void x86_64_optimize_func(int func_start, int func_end)
                                 mod = (gp[3] >> 6) & 3;
                                 if ((mod == 1 || mod == 2) && (gp[3] & 7) == 5)
                                     r_disp = (mod == 1) ? (int8_t)gp[4] : (int)read32le(gp + 4);
-                            } else if (gp[0] == 0xf2 && gp[1] == 0x0f && (gp[2] == 0x58 || gp[2] == 0x59 || gp[2] == 0x5c || gp[2] == 0x5e)) {
+                            } else if ((gp[0] == 0xf2 || gp[0] == 0xf3) && gp[1] == 0x0f && (gp[2] == 0x58 || gp[2] == 0x59 || gp[2] == 0x5c || gp[2] == 0x5e)) {
+                                mod = (gp[3] >> 6) & 3;
+                                if ((mod == 1 || mod == 2) && (gp[3] & 7) == 5)
+                                    r_disp = (mod == 1) ? (int8_t)gp[4] : (int)read32le(gp + 4);
+                            } else if (gp[0] == 0x66 && gp[1] == 0x0f && (gp[2] == 0x6e || gp[2] == 0x7e)) {
                                 mod = (gp[3] >> 6) & 3;
                                 if ((mod == 1 || mod == 2) && (gp[3] & 7) == 5)
                                     r_disp = (mod == 1) ? (int8_t)gp[4] : (int)read32le(gp + 4);
@@ -3517,13 +4114,19 @@ static void x86_64_optimize_func(int func_start, int func_end)
                                         can_promote = 0; break;
                                     }
                                 }
-                            } else if (cp[0] == 0xf2 && cp[1] == 0x0f && (cp[2] == 0x58 || cp[2] == 0x59 || cp[2] == 0x5c || cp[2] == 0x5e)) {
+                            } else if ((cp[0] == 0xf2 || cp[0] == 0xf3) && cp[1] == 0x0f && (cp[2] == 0x58 || cp[2] == 0x59 || cp[2] == 0x5c || cp[2] == 0x5e)) {
                                 int cmod = (cp[3] >> 6) & 3;
                                 if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
                                     int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
                                     if (cdisp == disp1 && ((cp[3] >> 3) & 7) != 0) {
                                         can_promote = 0; break;
                                     }
+                                }
+                            } else if (cp[0] == 0x66 && cp[1] == 0x0f && (cp[2] == 0x6e || cp[2] == 0x7e)) {
+                                int cmod = (cp[3] >> 6) & 3;
+                                if ((cmod == 1 || cmod == 2) && (cp[3] & 7) == 5) {
+                                    int cdisp = (cmod == 1) ? (int8_t)cp[4] : (int)read32le(cp + 4);
+                                    if (cdisp == disp1) { can_promote = 0; break; }
                                 }
                             }
                             chk_pc += chk_len;

@@ -876,6 +876,11 @@ struct TCCState {
     int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
     CachedInclude **cached_includes;
     int nb_cached_includes;
+    struct {
+        char name[64];
+        int path_idx;
+        int is_quote;
+    } inc_idx_hash[512];
 
     /* #pragma pack stack */
     int pack_stack[PACK_STACK_SIZE];

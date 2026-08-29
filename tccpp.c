@@ -1319,6 +1319,7 @@ ST_FUNC void skip_to_eol(int warn)
     next_nomacro();
 }
 
+
 static CachedInclude *
 search_cached_include(TCCState *s1, const char *filename, int add);
 
@@ -1361,6 +1362,41 @@ static int parse_include(TCCState *s1, int do_next, int test)
     if (!test)
         skip_to_eol(1);
 
+    if (!do_next && !test && strlen(name) < 64) {
+        unsigned int h = TOK_HASH_INIT;
+        const char *s = name;
+        int ch;
+        while ((ch = (unsigned char)*s++) != 0)
+            h = TOK_HASH_FUNC(h, ch);
+        h &= 511;
+        if (s1->inc_idx_hash[h].path_idx > 0 &&
+            s1->inc_idx_hash[h].is_quote == (c == '\"') &&
+            strcmp(s1->inc_idx_hash[h].name, name) == 0) {
+            i = s1->inc_idx_hash[h].path_idx;
+            if (i == 1) {
+                p = file->true_filename;
+                pstrncpy(buf, sizeof buf, p, tcc_basename(p) - p);
+            } else {
+                int j = i - 2, k = j - s1->nb_include_paths;
+                if (k < 0)
+                    p = s1->include_paths[j];
+                else if (k < s1->nb_sysinclude_paths)
+                    p = s1->sysinclude_paths[k];
+                else
+                    p = "";
+                pstrcpy(buf, sizeof buf, p);
+                pstrcat(buf, sizeof buf, "/");
+            }
+            pstrcat(buf, sizeof buf, name);
+            e = search_cached_include(s1, buf, 0);
+            if (e && (define_find(e->ifndef_macro) || e->once)) {
+                return 1;
+            }
+            if (tcc_open(s1, buf) >= 0)
+                goto inc_opened;
+        }
+    }
+
     i = do_next ? file->include_next_index : -1;
     for (;;) {
         ++i;
@@ -1401,9 +1437,22 @@ static int parse_include(TCCState *s1, int do_next, int test)
                    (int)(s1->include_stack_ptr - s1->include_stack), "", buf);
             return 1;
         }
-        if (tcc_open(s1, buf) >= 0)
+        if (tcc_open(s1, buf) >= 0) {
+            if (!do_next && !test && strlen(name) < 64 && i > 0) {
+                unsigned int h = TOK_HASH_INIT;
+                const char *s = name;
+                int ch;
+                while ((ch = (unsigned char)*s++) != 0)
+                    h = TOK_HASH_FUNC(h, ch);
+                h &= 511;
+                strcpy(s1->inc_idx_hash[h].name, name);
+                s1->inc_idx_hash[h].path_idx = i;
+                s1->inc_idx_hash[h].is_quote = (c == '\"');
+            }
             break;
+        }
     }
+inc_opened:
 
     if (test) {
         tcc_close();
