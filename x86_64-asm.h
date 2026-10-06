@@ -549,6 +549,138 @@ ALT(DEF_ASM_OP2(cvtsd2si, 0xf20f2d, 0, OPC_MODRM | OPC_48, OPT_EA | OPT_SSE, OPT
     DEF_ASM_OP0L(sfence, 0x0fae, 7, OPC_MODRM)
     DEF_ASM_OP1(clflush, 0x0fae, 7, OPC_MODRM, OPT_EA)
 
+    /* ================================================================ */
+    /* SSE2 — full coverage (66 0F prefix)                               */
+    /* ================================================================ */
+
+    /* SSE2 packed double-precision arithmetic */
+    DEF_ASM_OP2(addpd,    0x660f58, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(addsd,    0xf20f58, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(addss,    0xf30f58, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(subpd,    0x660f5c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(subsd,    0xf20f5c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(subss,    0xf30f5c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(mulpd,    0x660f59, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(mulsd,    0xf20f59, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(mulss,    0xf30f59, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(divpd,    0x660f5e, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(divsd,    0xf20f5e, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(divss,    0xf30f5e, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(sqrtpd,   0x660f51, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    /* sqrtss already defined above */
+    DEF_ASM_OP2(minpd,    0x660f5d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(minsd,    0xf20f5d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(minss,    0xf30f5d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(maxpd,    0x660f5f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(maxsd,    0xf20f5f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(maxss,    0xf30f5f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    /* rcpss already defined above */
+    DEF_ASM_OP2(rcpps,    0x0f53,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(rsqrtss,  0xf30f52, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+
+    /* SSE2 logical */
+    /* andpd/andps already defined above */
+    DEF_ASM_OP2(andnpd,   0x660f55, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(orpd,     0x660f56, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(xorpd,    0x660f57, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(andnps,   0x0f55,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(orps,     0x0f56,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(xorps,    0x0f57,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+
+    /* SSE2 compare */
+    DEF_ASM_OP2(comisd,   0x660f2f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(ucomisd,  0x660f2e, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(comiss,   0x0f2f,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(ucomiss,  0x0f2e,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+
+    /* SSE2 data movement */
+    DEF_ASM_OP2(movapd,   0x660f28, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movapd,   0x660f29, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movupd,   0x660f10, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movupd,   0x660f11, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movsd,    0xf20f10, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movsd,    0xf20f11, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movss,    0xf30f10, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movss,    0xf30f11, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movlpd,   0x660f12, 0, OPC_MODRM, OPT_EA, OPT_SSE)
+ALT(DEF_ASM_OP2(movlpd,   0x660f13, 0, OPC_MODRM, OPT_SSE, OPT_EA))
+    DEF_ASM_OP2(movhpd,   0x660f16, 0, OPC_MODRM, OPT_EA, OPT_SSE)
+ALT(DEF_ASM_OP2(movhpd,   0x660f17, 0, OPC_MODRM, OPT_SSE, OPT_EA))
+    DEF_ASM_OP2(movlps,   0x0f12,   0, OPC_MODRM, OPT_EA, OPT_SSE)
+ALT(DEF_ASM_OP2(movlps,   0x0f13,   0, OPC_MODRM, OPT_SSE, OPT_EA))
+    DEF_ASM_OP2(movhlps,  0x0f12,   0, OPC_MODRM, OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(movlhps,  0x0f16,   0, OPC_MODRM, OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(movdqa,   0x660f6f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movdqa,   0x660f7f, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movdqu,   0xf30f6f, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+ALT(DEF_ASM_OP2(movdqu,   0xf30f7f, 0, OPC_MODRM, OPT_SSE, OPT_EA | OPT_SSE))
+    DEF_ASM_OP2(movntpd,  0x660fc3, 0, OPC_MODRM, OPT_SSE, OPT_EA)
+    DEF_ASM_OP2(movntdq,  0x660fe7, 0, OPC_MODRM, OPT_SSE, OPT_EA)
+    DEF_ASM_OP2(movntps,  0x0f2b,   0, OPC_MODRM, OPT_SSE, OPT_EA)
+    DEF_ASM_OP2(movmskpd, 0x660f50, 0, OPC_MODRM, OPT_SSE, OPT_REG32)
+    DEF_ASM_OP2(movmskps, 0x0f50,   0, OPC_MODRM, OPT_SSE, OPT_REG32)
+    DEF_ASM_OP2(movddup,  0xf20f12, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(movshdup, 0xf30f16, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(movsldup, 0xf30f12, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(lddqu,    0xf20ff0, 0, OPC_MODRM, OPT_EA, OPT_SSE)
+
+    /* SSE2 conversion */
+    DEF_ASM_OP2(cvtdq2pd,  0xf30fe6, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtdq2ps,  0x0f5b,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtpd2dq,  0xf20fe6, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtpd2pi,  0x660f2d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_MMX)
+    DEF_ASM_OP2(cvtpd2ps,  0x660f5a, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtps2dq,  0x660f5b, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtps2pd,  0x0f5a,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtsd2ss,  0xf20f5a, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvtsi2sd,  0xf20f2a, 0, OPC_MODRM, OPT_REG32 | OPT_EA, OPT_SSE)
+ALT(DEF_ASM_OP2(cvtsi2sd,  0xf20f2a, 0, OPC_MODRM | OPC_48, OPT_REG64 | OPT_EA, OPT_SSE))
+    DEF_ASM_OP2(cvtsi2ss,  0xf30f2a, 0, OPC_MODRM, OPT_REG32 | OPT_EA, OPT_SSE)
+ALT(DEF_ASM_OP2(cvtsi2ss,  0xf30f2a, 0, OPC_MODRM | OPC_48, OPT_REG64 | OPT_EA, OPT_SSE))
+    DEF_ASM_OP2(cvtss2sd,  0xf30f5a, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvttpd2dq, 0x660fe6, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvttpd2pi, 0x660f2c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_MMX)
+    DEF_ASM_OP2(cvttps2dq, 0xf30f5b, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(cvttsd2si, 0xf20f2c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_REG32)
+ALT(DEF_ASM_OP2(cvttsd2si, 0xf20f2c, 0, OPC_MODRM | OPC_48, OPT_EA | OPT_SSE, OPT_REG64))
+    DEF_ASM_OP2(cvttss2si, 0xf30f2c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_REG32)
+ALT(DEF_ASM_OP2(cvttss2si, 0xf30f2c, 0, OPC_MODRM | OPC_48, OPT_EA | OPT_SSE, OPT_REG64))
+
+    /* SSE2 integer ops (66 0F prefix) */
+    DEF_ASM_OP2(paddq,    0x660fd4, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(psubq,    0x660ffb, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(pmuludq,  0x660ff4, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(pshufd,   0x660f70, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(pshufhw,  0xf30f70, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(pshuflw,  0xf20f70, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(punpckhqdq, 0x660f6d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(punpcklqdq, 0x660f6c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(pslldq,   0x660f73, 7, OPC_MODRM, OPT_IM8, OPT_SSE)
+    DEF_ASM_OP2(psrldq,   0x660f73, 3, OPC_MODRM, OPT_IM8, OPT_SSE)
+
+    /* SSE2 unpack */
+    DEF_ASM_OP2(unpckhpd, 0x660f15, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(unpcklpd, 0x660f14, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(unpckhps, 0x0f15,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(unpcklps, 0x0f14,   0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+
+    /* SSE2 shuffle */
+    DEF_ASM_OP3(shufpd,   0x660fc6, 0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP3(shufps,   0x0fc6,   0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP3(cmppd,    0x660fc2, 0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP3(cmpsd,    0xf20fc2, 0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP3(cmpps,    0x0fc2,   0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP3(cmpss,    0xf30fc2, 0, OPC_MODRM, OPT_IM8, OPT_EA | OPT_SSE, OPT_SSE)
+
+    /* ================================================================ */
+    /* SSE3 (F2/F3 0F prefix additions)                                  */
+    /* ================================================================ */
+    DEF_ASM_OP2(haddpd,   0x660f7c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(haddps,   0xf20f7c, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(hsubpd,   0x660f7d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(hsubps,   0xf20f7d, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(addsubpd, 0x660fd0, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
+    DEF_ASM_OP2(addsubps, 0xf20fd0, 0, OPC_MODRM, OPT_EA | OPT_SSE, OPT_SSE)
     /* Control-Flow Enforcement */
     DEF_ASM_OP0L(endbr64, 0xf30f1e, 7, OPC_MODRM)
 #undef ALT

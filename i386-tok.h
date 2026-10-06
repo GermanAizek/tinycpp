@@ -176,6 +176,71 @@
  DEF_ASM(bpl)
  DEF_ASM(sil)
  DEF_ASM(dil)
+  /* Extended SSE, AVX, AVX-512 and opmask registers */
+ DEF_ASM(xmm8)
+ DEF_ASM(xmm9)
+ DEF_ASM(xmm10)
+ DEF_ASM(xmm11)
+ DEF_ASM(xmm12)
+ DEF_ASM(xmm13)
+ DEF_ASM(xmm14)
+ DEF_ASM(xmm15)
+ DEF_ASM(ymm0)
+ DEF_ASM(ymm1)
+ DEF_ASM(ymm2)
+ DEF_ASM(ymm3)
+ DEF_ASM(ymm4)
+ DEF_ASM(ymm5)
+ DEF_ASM(ymm6)
+ DEF_ASM(ymm7)
+ DEF_ASM(ymm8)
+ DEF_ASM(ymm9)
+ DEF_ASM(ymm10)
+ DEF_ASM(ymm11)
+ DEF_ASM(ymm12)
+ DEF_ASM(ymm13)
+ DEF_ASM(ymm14)
+ DEF_ASM(ymm15)
+ DEF_ASM(zmm0)
+ DEF_ASM(zmm1)
+ DEF_ASM(zmm2)
+ DEF_ASM(zmm3)
+ DEF_ASM(zmm4)
+ DEF_ASM(zmm5)
+ DEF_ASM(zmm6)
+ DEF_ASM(zmm7)
+ DEF_ASM(zmm8)
+ DEF_ASM(zmm9)
+ DEF_ASM(zmm10)
+ DEF_ASM(zmm11)
+ DEF_ASM(zmm12)
+ DEF_ASM(zmm13)
+ DEF_ASM(zmm14)
+ DEF_ASM(zmm15)
+ DEF_ASM(zmm16)
+ DEF_ASM(zmm17)
+ DEF_ASM(zmm18)
+ DEF_ASM(zmm19)
+ DEF_ASM(zmm20)
+ DEF_ASM(zmm21)
+ DEF_ASM(zmm22)
+ DEF_ASM(zmm23)
+ DEF_ASM(zmm24)
+ DEF_ASM(zmm25)
+ DEF_ASM(zmm26)
+ DEF_ASM(zmm27)
+ DEF_ASM(zmm28)
+ DEF_ASM(zmm29)
+ DEF_ASM(zmm30)
+ DEF_ASM(zmm31)
+ DEF_ASM(k0)
+ DEF_ASM(k1)
+ DEF_ASM(k2)
+ DEF_ASM(k3)
+ DEF_ASM(k4)
+ DEF_ASM(k5)
+ DEF_ASM(k6)
+ DEF_ASM(k7)
 #endif
  /* generic two operands */
  DEF_BWLX(mov)
@@ -330,3 +395,21 @@
 #else
 # include "i386-asm.h"
 #endif
+
+/* VEX/EVEX instruction name tokens */
+#ifdef TCC_TARGET_X86_64
+#define ALT(x)
+#define DEF_VEX_OP0(name, mm, pp, opc, fl) DEF_ASM(name)
+#define DEF_VEX_OP1(name, mm, pp, opc, fl, o0) DEF_ASM(name)
+#define DEF_VEX_OP2(name, mm, pp, opc, fl, o0, o1) DEF_ASM(name)
+#define DEF_VEX_OP3(name, mm, pp, opc, fl, o0, o1, o2) DEF_ASM(name)
+#define DEF_VEX_OP4(name, mm, pp, opc, fl, o0, o1, o2, o3) DEF_ASM(name)
+# include "x86_64-vex.h"
+#undef DEF_VEX_OP0
+#undef DEF_VEX_OP1
+#undef DEF_VEX_OP2
+#undef DEF_VEX_OP3
+#undef DEF_VEX_OP4
+#undef ALT
+#endif
+

@@ -75,10 +75,15 @@ def run_command_measured(cmd, build_dir, timeout_sec=60):
                             peak_rss_kb = int(p.split(":")[1])
                         elif p.startswith("elapsed_sec:"):
                             sec = float(p.split(":")[1])
-                            elapsed_ms = sec * 1000.0
+                            sec_ms = sec * 1000.0
+                            if sec_ms > 0:
+                                elapsed_ms = sec_ms
             os.remove(time_output_file)
         except Exception:
             pass
+
+    if elapsed_ms <= 0:
+        elapsed_ms = wall_ms
 
     return rc, round(elapsed_ms, 2), peak_rss_kb, stdout, stderr
 
@@ -132,9 +137,12 @@ def build_and_run_benchmark(bench_file, lang, compiler_name, compiler_bin, opt_f
     out_exe = os.path.join(build_dir, f"bench_{bench_basename}_{compiler_name}_{opt_flag.replace('-', '')}_{arch}_{tid}.exe")
     
     # Construct compilation command
-    compile_cmd = []
     tcc_include_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "include"))
-    tcc_bdir = os.path.abspath(build_dir)
+    compiler_dir = os.path.dirname(os.path.abspath(compiler_bin))
+    if os.path.exists(os.path.join(compiler_dir, "libtcc1.a")):
+        tcc_bdir = compiler_dir
+    else:
+        tcc_bdir = os.path.abspath(build_dir)
     
     is_tcc = "tcc" in compiler_name or "t++" in compiler_name
     math_needed = any(k in bench_basename for k in ("fft", "mandelbrot", "nbody", "raytracer", "spectral_norm", "audio", "graphics", "video", "crypto", "math"))
@@ -754,8 +762,8 @@ def generate_html_report(results, report_file):
             if (tccRows.length > 0 && gccClangRows.length > 0) {{
                 const avgTccCompile = tccRows.reduce((a, b) => a + b.compile_time_ms, 0) / tccRows.length;
                 const avgGccCompile = gccClangRows.reduce((a, b) => a + b.compile_time_ms, 0) / gccClangRows.length;
-                const speedup = avgTccCompile > 0 ? (avgGccCompile / avgTccCompile).toFixed(1) : '1.0';
-                document.getElementById('kpiCompileSpeedup').textContent = speedup + 'x';
+                const speedup = avgTccCompile > 0 ? (avgGccCompile / avgTccCompile).toFixed(1) : (avgGccCompile > 0 ? '> 10' : '1.0');
+                document.getElementById('kpiCompileSpeedup').textContent = speedup + (speedup.endsWith('x') ? '' : 'x');
 
                 const avgTccRam = tccRows.reduce((a, b) => a + b.compiler_peak_rss_kb, 0) / tccRows.length;
                 const avgGccRam = gccClangRows.reduce((a, b) => a + b.compiler_peak_rss_kb, 0) / gccClangRows.length;
@@ -770,7 +778,7 @@ def generate_html_report(results, report_file):
                 const avgBin = data.reduce((a, b) => a + b.binary_size_bytes, 0) / data.length / 1024;
                 document.getElementById('kpiBinSize').textContent = avgBin.toFixed(1) + ' KB';
 
-                const validExec = data.filter(d => d.exec_peak_rss_kb > 0);
+                const validExec = data.filter(d => d.exec_success && d.exec_peak_rss_kb > 0);
                 if (validExec.length > 0) {{
                     const avgExecRam = validExec.reduce((a, b) => a + b.exec_peak_rss_kb, 0) / validExec.length;
                     document.getElementById('kpiExecRam').textContent = Math.round(avgExecRam).toLocaleString() + ' KB';
@@ -790,12 +798,16 @@ def generate_html_report(results, report_file):
             const container = document.getElementById(containerId);
             container.innerHTML = '';
 
+            const isExecMetric = metricKey.startsWith('exec');
+            const validRecords = data.filter(d => isExecMetric ? d.exec_success : d.compile_success);
+
             // Aggregate by compiler
             const compMap = {{}};
-            data.forEach(d => {{
-                if (d[metricKey] > 0) {{
+            validRecords.forEach(d => {{
+                const val = d[metricKey];
+                if (val !== undefined && val !== null && !isNaN(val)) {{
                     if (!compMap[d.compiler]) compMap[d.compiler] = {{ sum: 0, count: 0 }};
-                    compMap[d.compiler].sum += d[metricKey];
+                    compMap[d.compiler].sum += val;
                     compMap[d.compiler].count++;
                 }}
             }});
@@ -817,12 +829,13 @@ def generate_html_report(results, report_file):
             items.forEach(item => {{
                 const pct = maxVal > 0 ? (item.avg / maxVal * 100) : 0;
                 const color = getCompilerColor(item.compiler);
+                const displayVal = item.avg < 0.05 ? (item.avg === 0 ? '0.0' : '< 0.1') : item.avg.toFixed(1);
                 const row = document.createElement('div');
                 row.style.marginBottom = '12px';
                 row.innerHTML = `
                     <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
                         <span style="font-weight: 600;">${{item.compiler}}</span>
-                        <span style="color: var(--text-muted);">${{item.avg.toFixed(1)}} ${{unit}}</span>
+                        <span style="color: var(--text-muted);">${{displayVal}} ${{unit}}</span>
                     </div>
                     <div class="bar-container">
                         <div class="bar-fill" style="width: ${{Math.max(pct, 2)}}%; background-color: ${{color}};"></div>
@@ -860,17 +873,23 @@ def generate_html_report(results, report_file):
                 const langBadgeClass = d.lang === 'c' ? 'badge-c' : 'badge-cpp';
                 const optBadgeClass = 'badge-opt-' + d.opt.replace('-', '');
 
+                const compileTimeStr = d.compile_success ? (d.compile_time_ms < 0.05 ? '< 0.1 ms' : d.compile_time_ms.toFixed(1) + ' ms') : '<span style="color: var(--accent-red);">Failed</span>';
+                const compileRamStr = d.compile_success ? (d.compiler_peak_rss_kb > 0 ? d.compiler_peak_rss_kb.toLocaleString() + ' KB' : '< 1,000 KB') : 'N/A';
+                const execTimeStr = d.exec_success ? (d.exec_time_ms < 0.05 ? (d.exec_time_ms === 0 ? '0.0 ms' : '< 0.1 ms') : d.exec_time_ms.toFixed(1) + ' ms') : (d.compile_success ? (d.note || '<span style="color: var(--accent-red);">Failed</span>') : '<span style="color: var(--text-muted);">N/A</span>');
+                const execRamStr = d.exec_success ? (d.exec_peak_rss_kb > 0 ? d.exec_peak_rss_kb.toLocaleString() + ' KB' : '< 1,000 KB') : '<span style="color: var(--text-muted);">N/A</span>';
+                const binSizeStr = (d.binary_size_bytes / 1024).toFixed(1) + ' KB';
+
                 tr.innerHTML = `
                     <td><strong>${{d.benchmark}}</strong></td>
                     <td><span class="badge ${{langBadgeClass}}">${{d.lang.toUpperCase()}}</span></td>
                     <td><span class="badge" style="background: rgba(255,255,255,0.08); color: #cbd5e1;">${{d.arch}}</span></td>
                     <td><span class="badge ${{compBadgeClass}}">${{d.compiler}}</span></td>
                     <td><span class="badge ${{optBadgeClass}}">${{d.opt}}</span></td>
-                    <td style="color: var(--accent-green); font-weight: 600;">${{d.compile_time_ms.toFixed(1)}} ms</td>
-                    <td>${{d.compiler_peak_rss_kb.toLocaleString()}} KB</td>
-                    <td style="font-weight: 600;">${{d.exec_time_ms > 0 ? d.exec_time_ms.toFixed(1) + ' ms' : '<span style="color: var(--text-muted);">N/A</span>'}}</td>
-                    <td>${{d.exec_peak_rss_kb > 0 ? d.exec_peak_rss_kb.toLocaleString() + ' KB' : '<span style="color: var(--text-muted);">N/A</span>'}}</td>
-                    <td>${{(d.binary_size_bytes / 1024).toFixed(1)}} KB</td>
+                    <td style="color: var(--accent-green); font-weight: 600;">${{compileTimeStr}}</td>
+                    <td>${{compileRamStr}}</td>
+                    <td style="font-weight: 600;">${{execTimeStr}}</td>
+                    <td>${{execRamStr}}</td>
+                    <td>${{binSizeStr}}</td>
                 `;
                 tbody.appendChild(tr);
             }});

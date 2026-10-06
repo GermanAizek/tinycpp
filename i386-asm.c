@@ -22,7 +22,7 @@
 #define USING_GLOBALS
 #include "tcc.h"
 
-#define MAX_OPERANDS 3
+#define MAX_OPERANDS 4
 
 #define TOK_ASM_first TOK_ASM_clc
 #define TOK_ASM_last TOK_ASM_emms
@@ -104,6 +104,12 @@ enum {
     OPT_EA = 0x80
 };
 
+/* VEX/EVEX dedicated operand types (used in VEXInstr.op_type) */
+#define OPT_YMM    33
+#define OPT_ZMM    34
+#define OPT_MASK   35
+#define OPT_XYZMM  36
+
 #define OP_REG8   (1 << OPT_REG8)
 #define OP_REG16  (1 << OPT_REG16)
 #define OP_REG32  (1 << OPT_REG32)
@@ -138,6 +144,9 @@ enum {
 
 #define OP_EA     0x40000000u
 #define OP_REG    (OP_REG8 | OP_REG16 | OP_REG32 | OP_REG64)
+#define OP_YMM    (1u << 23)
+#define OP_ZMM    (1u << 24)
+#define OP_MASK   (1u << 25)
 
 #ifdef TCC_TARGET_X86_64
 # define TREG_XAX   TREG_RAX
@@ -289,6 +298,20 @@ static int asm_parse_numeric_reg(int t, unsigned int *type)
     if (t >= TOK_IDENT && t < tok_ident) {
 	const char *s = table_ident[t - TOK_IDENT]->str;
 	char c;
+        /* Check for ymm/zmm/k register names (for extended registers not in
+           the fixed token table, e.g. ymm16-ymm31, zmm16-zmm31) */
+        if (s[0] == 'y' && s[1] == 'm' && s[2] == 'm') {
+            s += 3;
+            *type = OP_YMM;
+            goto parse_num;
+        } else if (s[0] == 'z' && s[1] == 'm' && s[2] == 'm') {
+            s += 3;
+            *type = OP_ZMM;
+            goto parse_num;
+        } else if (s[0] == 'k' && s[1] >= '0' && s[1] <= '7' && !s[2]) {
+            *type = OP_MASK;
+            return s[1] - '0';
+        }
 	*type = OP_REG64;
 	if (*s == 'c') {
 	    s++;
@@ -296,6 +319,7 @@ static int asm_parse_numeric_reg(int t, unsigned int *type)
 	}
 	if (*s++ != 'r')
 	  return -1;
+    parse_num:
 	/* Don't allow leading '0'.  */
 	if ((c = *s++) >= '1' && c <= '9')
 	  reg = c - '0';
@@ -303,6 +327,14 @@ static int asm_parse_numeric_reg(int t, unsigned int *type)
 	  return -1;
 	if ((c = *s) >= '0' && c <= '5')
 	  s++, reg = reg * 10 + c - '0';
+	if (reg > 31)
+	  return -1;
+        /* ymm/zmm: only 0-31 valid, checked above */
+        if (*type == OP_YMM || *type == OP_ZMM) {
+            if (reg > 31 || *s != 0)
+                return -1;
+            return reg;
+        }
 	if (reg > 15)
 	  return -1;
 	if ((c = *s) == 0)
@@ -404,6 +436,28 @@ static void parse_operand(TCCState *s1, Operand *op)
 	} else if (tok >= TOK_ASM_spl && tok <= TOK_ASM_dil) {
 	    op->type = OP_REG8 | OP_REG8_LOW;
 	    op->reg = 4 + tok - TOK_ASM_spl;
+        /* YMM registers ymm0-ymm7 (and x86-64: ymm8-ymm15) */
+        } else if (tok >= TOK_ASM_ymm0 && tok <= TOK_ASM_ymm7) {
+            op->type = OP_YMM;
+            op->reg = tok - TOK_ASM_ymm0;
+        } else if (tok >= TOK_ASM_ymm8 && tok <= TOK_ASM_ymm15) {
+            op->type = OP_YMM;
+            op->reg = 8 + tok - TOK_ASM_ymm8;
+        /* ZMM registers zmm0-zmm7 (and x86-64: zmm8-zmm31) */
+        } else if (tok >= TOK_ASM_zmm0 && tok <= TOK_ASM_zmm7) {
+            op->type = OP_ZMM;
+            op->reg = tok - TOK_ASM_zmm0;
+        } else if (tok >= TOK_ASM_zmm8 && tok <= TOK_ASM_zmm31) {
+            op->type = OP_ZMM;
+            op->reg = 8 + tok - TOK_ASM_zmm8;
+        /* Opmask registers k0-k7 */
+        } else if (tok >= TOK_ASM_k0 && tok <= TOK_ASM_k7) {
+            op->type = OP_MASK;
+            op->reg = tok - TOK_ASM_k0;
+        /* XMM registers xmm8-xmm15 (x86-64 extended) */
+        } else if (tok >= TOK_ASM_xmm8 && tok <= TOK_ASM_xmm15) {
+            op->type = OP_SSE;
+            op->reg = 8 + tok - TOK_ASM_xmm8;
         } else if ((op->reg = asm_parse_numeric_reg(tok, &op->type)) >= 0) {
 	    ;
 #endif
@@ -525,8 +579,8 @@ static inline int asm_modrm(int reg, Operand *op)
 {
     int mod, reg1, reg2, sib_reg1;
 
-    if (op->type & (OP_REG | OP_MMX | OP_SSE)) {
-        g(0xc0 + (reg << 3) + op->reg);
+    if (op->type & (OP_REG | OP_MMX | OP_SSE | OP_YMM | OP_ZMM | OP_MASK)) {
+        g(0xc0 + ((reg & 7) << 3) + (op->reg & 7));
     } else if (op->reg == -1 && op->reg2 == -1) {
         /* displacement only */
 #ifdef TCC_TARGET_X86_64
@@ -641,6 +695,321 @@ static void asm_rex(int width64, Operand *ops, int nb_ops, int *op_type,
 }
 #endif
 
+/* ======================================================================
+ * VEX / EVEX prefix encoder infrastructure
+ * Supports AVX, AVX2, FMA3, AES-NI, SHA-NI, and AVX-512 instructions.
+ * ====================================================================== */
+
+#ifdef TCC_TARGET_X86_64
+
+/* VEX instruction descriptor — separate from ASMInstr to avoid widening
+   the hot legacy table. Uses a compact 8-byte record. */
+typedef struct VEXInstr {
+    uint32_t tok;        /* TOK_ASM_xxx */
+    uint8_t  mm;         /* map_select: 1=0F, 2=0F38, 3=0F3A */
+    uint8_t  pp;         /* pp field: 0=none, 1=66, 2=F3, 3=F2 */
+    uint8_t  opcode;     /* 1-byte opcode after escape map */
+    uint8_t  vex_flags;  /* VEXF_xxx flags (see below) */
+    uint8_t  nb_ops;
+    uint8_t  op_type[4]; /* operand type flags (OPT_SSE|OPT_YMM|OPT_ZMM|
+                            OPT_MASK|OPT_EA|OPT_REG32|OPT_REG64|OPT_IM8) */
+} VEXInstr;
+
+/* vex_flags bits */
+#define VEXF_W1      0x01  /* VEX.W=1 (64-bit or double-precision) */
+#define VEXF_L256    0x02  /* VEX.L=1 (256-bit YMM operation) */
+#define VEXF_L512    0x04  /* EVEX L'L=10 (512-bit ZMM operation) */
+#define VEXF_MODRM   0x08  /* instruction has ModR/M byte */
+#define VEXF_VEX3    0x10  /* force 3-byte VEX even when 2-byte would work */
+#define VEXF_EVEX    0x20  /* use EVEX (0x62 prefix) rather than VEX */
+#define VEXF_IMM8    0x40  /* 8-bit immediate follows ModR/M */
+#define VEXF_MASKZ   0x80  /* zeroing masking supported (EVEX.z) */
+
+/* pp encoding values */
+#define VEX_PP_NONE  0
+#define VEX_PP_66    1
+#define VEX_PP_F3    2
+#define VEX_PP_F2    3
+
+/* map_select values */
+#define VEX_MM_0F    1
+#define VEX_MM_0F38  2
+#define VEX_MM_0F3A  3
+
+/* -----------------------------------------------------------------------
+ * 2-byte VEX prefix: C5 [R | ~vvvv | L | pp]
+ *   Valid only when: X=1, B=1, W=0, map_select=1
+ * ----------------------------------------------------------------------- */
+static void emit_vex2(int R, int vvvv, int L, int pp)
+{
+    g(0xC5);
+    g(((R & 1) << 7) | ((~vvvv & 0xF) << 3) | ((L & 1) << 2) | (pp & 3));
+}
+
+/* -----------------------------------------------------------------------
+ * 3-byte VEX prefix: C4 [R X B map_select] [W ~vvvv L pp]
+ * ----------------------------------------------------------------------- */
+static void emit_vex3(int R, int X, int B, int mm,
+                      int W, int vvvv, int L, int pp)
+{
+    g(0xC4);
+    g(((R & 1) << 7) | ((X & 1) << 6) | ((B & 1) << 5) | (mm & 0x1F));
+    g(((W & 1) << 7) | ((~vvvv & 0xF) << 3) | ((L & 1) << 2) | (pp & 3));
+}
+
+/* -----------------------------------------------------------------------
+ * 4-byte EVEX prefix: 62 [R X B R' 00 mm] [W ~vvvv 1 pp]
+ *                        [z L' L b V' aaa]
+ * ----------------------------------------------------------------------- */
+static void emit_evex(int R, int X, int B, int Rp, int mm, int pp,
+                      int W, int vvvv, int z, int Lp, int L,
+                      int b, int Vp, int aaa)
+{
+    g(0x62);
+    g(((R & 1) << 7) | ((X & 1) << 6) | ((B & 1) << 5) |
+      ((Rp & 1) << 4) | (mm & 3));
+    g(((W & 1) << 7) | ((~vvvv & 0xF) << 3) | 0x04 | (pp & 3));
+    g(((z & 1) << 7) | ((Lp & 1) << 6) | ((L & 1) << 5) |
+      ((b & 1) << 4) | ((Vp & 1) << 3) | (aaa & 7));
+}
+
+/* Forward declaration for the VEX opcode table */
+static void asm_vex_opcode(TCCState *s1, int opcode,
+                           Operand *ops, int nb_ops);
+
+/* -----------------------------------------------------------------------
+ * VEX instruction table
+ * Included once to build the table; included again in i386-tok.h (with
+ * DEF_VEX_OPx → DEF_ASM) to register token names.
+ * ----------------------------------------------------------------------- */
+static const VEXInstr vex_instrs[] = {
+#define ALT(x) x
+#define DEF_VEX_OP0(name, mm, pp, opc, fl) \
+    { TOK_ASM_##name, mm, pp, opc, fl, 0, { 0, 0, 0, 0 } },
+#define DEF_VEX_OP1(name, mm, pp, opc, fl, o0) \
+    { TOK_ASM_##name, mm, pp, opc, fl, 1, { o0, 0, 0, 0 } },
+#define DEF_VEX_OP2(name, mm, pp, opc, fl, o0, o1) \
+    { TOK_ASM_##name, mm, pp, opc, fl, 2, { o0, o1, 0, 0 } },
+#define DEF_VEX_OP3(name, mm, pp, opc, fl, o0, o1, o2) \
+    { TOK_ASM_##name, mm, pp, opc, fl, 3, { o0, o1, o2, 0 } },
+#define DEF_VEX_OP4(name, mm, pp, opc, fl, o0, o1, o2, o3) \
+    { TOK_ASM_##name, mm, pp, opc, fl, 4, { o0, o1, o2, o3 } },
+# include "x86_64-vex.h"
+#undef DEF_VEX_OP0
+#undef DEF_VEX_OP1
+#undef DEF_VEX_OP2
+#undef DEF_VEX_OP3
+#undef DEF_VEX_OP4
+#undef ALT
+    { 0 }
+};
+
+/* -----------------------------------------------------------------------
+ * asm_vex_opcode — dispatch VEX/EVEX instructions
+ *
+ * Called from asm_opcode() when the legacy instruction table fails.
+ * Operands are in AT&T / GAS order:
+ *   0-op:  vzeroupper, vzeroall
+ *   1-op:  src/dst in ops[0]
+ *   2-op:  load: ops[0]=src(rm), ops[1]=dst(reg)
+ *          store: ops[0]=src(reg), ops[1]=dst(rm)
+ *   3-op:  ops[0]=src2(rm), ops[1]=src1(vvvv), ops[2]=dst(reg)
+ *          imm3: ops[0]=imm, ops[1]=src(rm), ops[2]=dst(reg)
+ *   4-op:  imm4: ops[0]=imm, ops[1]=src2(rm), ops[2]=src1(vvvv), ops[3]=dst(reg)
+ * ----------------------------------------------------------------------- */
+static void asm_vex_opcode(TCCState *s1, int opcode,
+                           Operand *ops, int nb_ops)
+{
+    const VEXInstr *pv;
+    int i, reg, rm, vvvv_reg;
+    int R, X, B, Rp, Vp;
+    int L, Lp, W, z, b_bc, aaa;
+    int modrm_index, vvvv_index, reg_index;
+    int match;
+    int pc;
+    uint8_t imm_val = 0;
+
+    /* Search the VEX instruction table */
+    for (pv = vex_instrs; pv->tok != 0; pv++) {
+        if (pv->tok != (uint32_t)opcode)
+            continue;
+        if (pv->nb_ops != nb_ops)
+            continue;
+        /* Check operand types */
+        match = 1;
+        for (i = 0; i < nb_ops; i++) {
+            uint32_t need = pv->op_type[i];
+            uint32_t got  = ops[i].type;
+            uint32_t vmask;
+            uint32_t base_type = need & ~OPT_EA;
+            if (base_type == OPT_XYZMM)
+                vmask = OP_SSE | OP_YMM | OP_ZMM;
+            else if (base_type == OPT_YMM)
+                vmask = OP_YMM;
+            else if (base_type == OPT_ZMM)
+                vmask = OP_ZMM;
+            else if (base_type == OPT_MASK)
+                vmask = OP_MASK;
+            else if (base_type == OPT_SSE)
+                vmask = OP_SSE;
+            else if (base_type == OPT_MMX)
+                vmask = OP_MMX;
+            else if (base_type == OPT_MMXSSE)
+                vmask = OP_MMX | OP_SSE;
+            else if (base_type == OPT_REG32)
+                vmask = OP_REG32;
+            else if (base_type == OPT_REG64)
+                vmask = OP_REG64;
+            else if (base_type == OPT_IM8)
+                vmask = OP_IM8;
+            else
+                vmask = (1u << (base_type & 0x1F));
+            if (need & OPT_EA)
+                vmask |= OP_EA;
+            if (!(got & vmask)) {
+                match = 0;
+                break;
+            }
+        }
+        if (match)
+            break;
+    }
+
+    if (pv->tok == 0) {
+        tcc_error("unknown VEX opcode '%s'", get_tok_str(opcode, NULL));
+        return;
+    }
+
+    /* Determine vector length from operand types:
+       ZMM → EVEX L'L=10 (512-bit)
+       YMM → L=1 (256-bit)
+       XMM → L=0 (128-bit) */
+    L = 0; Lp = 0;
+    for (i = 0; i < nb_ops; i++) {
+        if (ops[i].type & OP_ZMM) { L = 0; Lp = 1; break; }
+        if (ops[i].type & OP_YMM) { L = 1; }
+    }
+    /* Flags override auto-detect */
+    if (pv->vex_flags & VEXF_L512) { L = 0; Lp = 1; }
+    else if (pv->vex_flags & VEXF_L256) { L = 1; Lp = 0; }
+
+    W = (pv->vex_flags & VEXF_W1) ? 1 : 0;
+
+    /* Determine operand roles according to GAS convention:
+       Immediate is always ops[0] if instruction has VEXF_IMM8. */
+    modrm_index = -1;  /* ModR/M rm field */
+    vvvv_index  = -1;  /* VEX.vvvv field */
+    reg_index   = -1;  /* ModR/M reg field */
+
+    if (nb_ops == 0) {
+        emit_vex2(1, 0, L, pv->pp);
+        g(pv->opcode);
+        return;
+    }
+
+    if (pv->vex_flags & VEXF_IMM8) {
+        imm_val = (uint8_t)ops[0].e.v;
+        if (nb_ops == 4) {
+            /* e.g. vshufps $imm, %xmm3, %xmm2, %xmm1 */
+            modrm_index = 1;
+            vvvv_index  = 2;
+            reg_index   = 3;
+        } else if (nb_ops == 3) {
+            /* e.g. vroundps $imm, %xmm2, %xmm1 */
+            modrm_index = 1;
+            reg_index   = 2;
+        }
+    } else {
+        if (nb_ops == 3) {
+            /* e.g. vaddps %xmm2, %xmm1, %xmm0: rm=ops[0], vvvv=ops[1], reg=ops[2] */
+            modrm_index = 0;
+            vvvv_index  = 1;
+            reg_index   = 2;
+        } else if (nb_ops == 2) {
+            if (ops[1].type & OP_EA) {
+                /* store: vmovaps %xmm1, (%rax) -> reg=ops[0], rm=ops[1] */
+                reg_index   = 0;
+                modrm_index = 1;
+            } else {
+                /* load / reg-reg: vmovaps (%rax), %xmm1 -> rm=ops[0], reg=ops[1] */
+                modrm_index = 0;
+                reg_index   = 1;
+            }
+        } else if (nb_ops == 1) {
+            modrm_index = 0;
+            reg_index   = 0;
+        }
+    }
+
+    /* Extract register numbers */
+    reg = (reg_index >= 0) ? ops[reg_index].reg : 0;
+    rm  = (modrm_index >= 0) ? ops[modrm_index].reg : 0;
+    vvvv_reg = (vvvv_index >= 0) ? ops[vvvv_index].reg : 0; /* 0 inverts to 1111=unused */
+
+    /* Extension bits (1 = not extended, 0 = extended in VEX):
+       reg >= 8  -> R = 0
+       rm >= 8   -> B = 0
+       index >= 8-> X = 0 */
+    R  = (reg >= 8) ? 0 : 1;
+    Rp = (reg >= 16) ? 0 : 1;
+    B  = (rm >= 8) ? 0 : 1;
+    Vp = (vvvv_reg >= 16) ? 0 : 1;
+    X  = 1;
+    if (modrm_index >= 0) {
+        if (!(ops[modrm_index].type & OP_EA)) {
+            if (rm >= 16)
+                X = 0;
+        } else if (ops[modrm_index].reg2 >= 8) {
+            X = 0;
+        }
+    }
+
+    /* Normalize register indices for asm_modrm (must be 0..7) */
+    if (reg_index >= 0 && ops[reg_index].reg >= 8)
+        ops[reg_index].reg &= 7;
+    if (modrm_index >= 0 && ops[modrm_index].reg >= 8)
+        ops[modrm_index].reg &= 7;
+    if (modrm_index >= 0 && (ops[modrm_index].type & OP_EA) && ops[modrm_index].reg2 >= 8)
+        ops[modrm_index].reg2 &= 7;
+
+    reg      = reg & 0xF;
+    rm       = rm & 0xF;
+    vvvv_reg = vvvv_reg & 0xF;
+
+    z = 0; aaa = 0; b_bc = 0;
+
+    /* Decide VEX vs EVEX */
+    if ((pv->vex_flags & VEXF_EVEX) || Lp ||
+        (vvvv_reg > 15) || (reg > 15) || (rm > 15)) {
+        emit_evex(R, X, B, Rp, pv->mm, pv->pp, W, vvvv_reg,
+                  z, Lp, L, b_bc, Vp, aaa);
+        g(pv->opcode);
+    } else if ((pv->vex_flags & VEXF_VEX3) ||
+               pv->mm != VEX_MM_0F || W != 0 || !X || !B) {
+        emit_vex3(R, X, B, pv->mm, W, vvvv_reg, L, pv->pp);
+        g(pv->opcode);
+    } else {
+        emit_vex2(R, vvvv_reg, L, pv->pp);
+        g(pv->opcode);
+    }
+
+    /* ModR/M */
+    pc = 0;
+    if ((pv->vex_flags & VEXF_MODRM) && modrm_index >= 0) {
+        pc = asm_modrm(reg & 7, &ops[modrm_index]);
+    }
+
+    /* 8-bit immediate */
+    if (pv->vex_flags & VEXF_IMM8) {
+        g(imm_val);
+    }
+
+    /* Fixup PC-relative displacement */
+    if (pc)
+        add32le(cur_text_section->data + pc - 4, pc - ind);
+}
+#endif /* TCC_TARGET_X86_64 */
+
 
 static void maybe_print_stats (void)
 {
@@ -732,7 +1101,6 @@ ST_FUNC void asm_opcode(TCCState *s1, int opcode)
     }
 
     s = 0; /* avoid warning */
-
 again:
     /* optimize matching by using a lookup table (no hashing is needed
        !) */
@@ -862,7 +1230,13 @@ again:
 		opcode = tok_alloc(ts->str, ts->len-1)->tok;
 		goto again;
 	    }
+#ifdef TCC_TARGET_X86_64
+            /* Try VEX/EVEX instruction table before giving up */
+            asm_vex_opcode(s1, opcode, ops, nb_ops);
+            return;
+#else
             tcc_error("unknown opcode '%s'", ts->str);
+#endif
         }
     }
     /* if the size is unknown, then evaluate it (OPC_B or OPC_WL case) */
